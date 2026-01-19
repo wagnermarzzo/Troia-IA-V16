@@ -1,195 +1,158 @@
-import time, json, statistics, threading, requests, websocket
+import os
+import json
+import time
+import websocket
+import requests
 from datetime import datetime
 
-# ==================================================
-# 🔐 CREDENCIAIS (SUBSTITUA LOCALMENTE)
-# ==================================================
-DERIV_API_KEY = "UEISANwBEI9sPVR"
-TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
-CHAT_ID = "2055716345"
+# ================= CONFIG =================
+DERIV_API_KEY = os.getenv("UEISANwBEI9sPVR")
+TELEGRAM_TOKEN = os.getenv("8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU")
+CHAT_ID = os.getenv("2055716345")
 
-# ==================================================
-# ⚙️ CONFIGURAÇÕES
-# ==================================================
+if not DERIV_API_KEY or not TELEGRAM_TOKEN or not CHAT_ID:
+    raise Exception("Variáveis de ambiente não configuradas")
+
+WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 TIMEFRAME = 60
-CANDLES = 30
-BASE_SCORE = 0.65
-HEARTBEAT_INTERVAL = 1800  # 30 min
 
-ATIVOS_FOREX = [
-    "frxEURUSD","frxGBPUSD","frxUSDJPY","frxEURJPY","frxAUDUSD",
-    "frxUSDCAD","frxUSDCHF","frxNZDUSD","frxEURGBP","frxEURAUD",
-    "frxEURCHF","frxGBPJPY","frxAUDJPY","frxCADJPY","frxCHFJPY"
+# ================= IA MEMÓRIA =================
+pesos_ativos = {}
+pesos_direcao = {"CALL": 1.0, "PUT": 1.0}
+forca_minima = 0.65
+conf_minima = 1.0
+
+# ================= CONTROLE =================
+sinal_ativo = False
+ativo_atual = None
+direcao_atual = None
+preco_entrada = None
+forca_ultima = None
+
+# ================= ATIVOS =================
+ATIVOS = [
+    "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD",
+    "R_10","R_25","R_50",
+    "frxEURUSD_OTC","frxGBPUSD_OTC"
 ]
 
-ATIVOS_OTC = [
-    "frxEURUSD_otc","frxGBPUSD_otc","frxUSDJPY_otc",
-    "frxAUDUSD_otc","frxUSDCAD_otc"
-]
+# ================= TELEGRAM =================
+def send_telegram(msg):
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        data={"chat_id": CHAT_ID, "text": msg},
+        timeout=5
+    )
 
-signal_active = False
-signal_data = {}
-stats = {"green": 0, "red": 0}
-score_min = BASE_SCORE
-blocked_asset = None
-block_until = 0
-asset_index = 0
+# ================= IA =================
+def analisar_vela(o, h, l, c):
+    global forca_minima
+    corpo = abs(c - o)
+    total = h - l
+    if total == 0:
+        return None, None
 
-# ==================================================
-# 📩 TELEGRAM
-# ==================================================
-def send(msg):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": msg},
-            timeout=10
-        )
-    except:
-        pass
+    forca = corpo / total
+    if forca < forca_minima:
+        return None, None
 
-# ==================================================
-# 💓 HEARTBEAT
-# ==================================================
-def heartbeat():
-    while True:
-        send("💓 TROIA BOT ONLINE\nMonitorando mercado Deriv...")
-        time.sleep(HEARTBEAT_INTERVAL)
+    direcao = "CALL" if c > o else "PUT"
+    return direcao, forca
 
-# ==================================================
-# ⏰ OTC FILTER
-# ==================================================
-def otc_allowed():
-    utc = datetime.utcnow()
-    return utc.weekday() >= 5 or utc.hour < 6 or utc.hour >= 21
+def calcular_confianca(ativo, direcao, forca):
+    peso_ativo = pesos_ativos.get(ativo, 1.0)
+    peso_dir = pesos_direcao[direcao]
+    return peso_ativo * peso_dir * forca
 
-# ==================================================
-# 📊 ANÁLISE
-# ==================================================
-def analyze(c):
-    closes = [x["close"] for x in c]
-    bodies = [abs(x["close"] - x["open"]) for x in c]
+def reforcar(resultado):
+    global forca_minima
+    ajuste = 0.03 if resultado == "GREEN" else -0.05
 
-    direction = "CALL" if closes[-1] > closes[-5] else "PUT"
-    force = bodies[-1] / statistics.mean(bodies)
-    score = min(force / 2, 1)
+    pesos_ativos[ativo_atual] = pesos_ativos.get(ativo_atual, 1.0) + ajuste
+    pesos_direcao[direcao_atual] += ajuste
 
-    if score >= score_min:
-        return direction, score
-    return None, None
+    forca_minima += -0.01 if resultado == "GREEN" else 0.02
+    forca_minima = min(max(forca_minima, 0.55), 0.75)
 
-# ==================================================
-# 🧮 RESULTADO
-# ==================================================
-def check_result(c):
-    e = signal_data["entry"]
-    last = c[-1]["close"]
-    d = signal_data["dir"]
-    return "GREEN" if (last > e if d == "CALL" else last < e) else "RED"
-
-# ==================================================
-# 🌐 WEBSOCKET
-# ==================================================
+# ================= WEBSOCKET =================
 def on_open(ws):
-    send("🟢 TROIA BOT CONECTADO À DERIV")
+    send_telegram("🟢 Troia IA conectada à Deriv")
     ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-    ws.send(json.dumps({
-        "candles": ATIVOS_FOREX[0],
-        "interval": TIMEFRAME,
-        "count": CANDLES,
-        "end": "latest"
-    }))
 
-def on_message(ws, msg):
-    global signal_active, signal_data, score_min
-    global blocked_asset, block_until, asset_index
+def on_message(ws, message):
+    global sinal_ativo, ativo_atual, direcao_atual, preco_entrada, forca_ultima
 
-    data = json.loads(msg)
-    if "candles" not in data:
+    data = json.loads(message)
+
+    if "authorize" in data:
+        send_telegram("🤖 IA ATIVA | Aprendizado ONLINE")
+        for ativo in ATIVOS:
+            ws.send(json.dumps({
+                "ticks_history": ativo,
+                "style": "candles",
+                "granularity": TIMEFRAME,
+                "count": 2
+            }))
         return
 
-    candles = data["candles"]
-    asset = data["echo_req"]["candles"]
+    if "candles" in data and not sinal_ativo:
+        vela = data["candles"][-2]
+        o, h, l, c = map(float, [vela["open"], vela["high"], vela["low"], vela["close"]])
 
-    # ===== RESULTADO =====
-    if signal_active:
-        result = check_result(candles)
-        stats[result.lower()] += 1
+        direcao, forca = analisar_vela(o, h, l, c)
+        if not direcao:
+            return
 
-        if result == "RED":
-            score_min = min(score_min + 0.05, 0.85)
-            blocked_asset = asset
-            block_until = time.time() + 300
-        else:
-            score_min = BASE_SCORE
+        ativo = data["echo_req"]["ticks_history"]
+        confianca = calcular_confianca(ativo, direcao, forca)
 
-        send(
-            f"📊 RESULTADO TROIA BOT\n"
-            f"Ativo: {asset}\n"
-            f"Resultado: {result}\n"
-            f"📈 Green: {stats['green']} | 🔴 Red: {stats['red']}"
+        if confianca < conf_minima:
+            return
+
+        sinal_ativo = True
+        ativo_atual = ativo
+        direcao_atual = direcao
+        preco_entrada = c
+        forca_ultima = forca
+
+        send_telegram(
+            f"🧠 SINAL IA\nAtivo: {ativo}\nDireção: {direcao}\n"
+            f"Força: {forca:.2f}\nConfiança: {confianca:.2f}\n"
+            f"Entrada: PRÓXIMA VELA (1M)"
         )
 
-        signal_active = False
-        signal_data = {}
-        time.sleep(2)
+        ws.send(json.dumps({"ticks": ativo, "subscribe": 1}))
 
-    # ===== LISTA DE ATIVOS =====
-    ativos = ATIVOS_FOREX + (ATIVOS_OTC if otc_allowed() else [])
-    asset_index = (asset_index + 1) % len(ativos)
-    next_asset = ativos[asset_index]
+    if "tick" in data and sinal_ativo:
+        preco = float(data["tick"]["quote"])
+        resultado = "GREEN" if (
+            (direcao_atual == "CALL" and preco > preco_entrada) or
+            (direcao_atual == "PUT" and preco < preco_entrada)
+        ) else "RED"
 
-    if next_asset == blocked_asset and time.time() < block_until:
-        return
+        send_telegram(f"📊 RESULTADO IA: {resultado}")
+        reforcar(resultado)
 
-    # ===== ANÁLISE =====
-    if not signal_active:
-        direction, score = analyze(candles)
-        if direction:
-            signal_active = True
-            signal_data = {
-                "asset": asset,
-                "dir": direction,
-                "entry": candles[-1]["close"]
-            }
-
-            send(
-                f"🚨 SINAL TROIA BOT\n\n"
-                f"Ativo: {asset}\n"
-                f"Direção: {direction}\n"
-                f"⏭ Entrada na PRÓXIMA vela\n"
-                f"TF: 1M | Score: {round(score*100)}%"
-            )
-
-    ws.send(json.dumps({
-        "candles": next_asset,
-        "interval": TIMEFRAME,
-        "count": CANDLES,
-        "end": "latest"
-    }))
+        sinal_ativo = False
 
 def on_error(ws, error):
-    send(f"🔴 ERRO NO BOT\n{error}")
+    send_telegram(f"⚠️ Erro WS: {error}")
 
-def on_close(ws):
-    send("🔴 CONEXÃO FECHADA\nReconectando em 5s...")
+def on_close(ws, code, msg):
+    send_telegram("🔄 Reconectando IA...")
     time.sleep(5)
     start_ws()
 
 def start_ws():
-    ws = websocket.WebSocketApp(
-        "wss://ws.derivws.com/websockets/v3?app_id=1089",
+    websocket.WebSocketApp(
+        WS_URL,
         on_open=on_open,
         on_message=on_message,
         on_error=on_error,
         on_close=on_close
-    )
-    ws.run_forever()
+    ).run_forever(ping_interval=30, ping_timeout=10)
 
-# ==================================================
-# ▶️ MAIN
-# ==================================================
+# ================= MAIN =================
 if __name__ == "__main__":
-    send("🟢 TROIA BOT ONLINE\nSistema iniciado")
-    threading.Thread(target=heartbeat, daemon=True).start()
+    send_telegram("🚀 Troia IA iniciado")
     start_ws()
