@@ -4,9 +4,9 @@ from datetime import datetime
 # ==================================================
 # 🔐 CREDENCIAIS (SUBSTITUA LOCALMENTE)
 # ==================================================
-DERIV_API_KEY = "COLE_SUA_API_AQUI"
-TELEGRAM_TOKEN = "COLE_SEU_TOKEN_AQUI"
-CHAT_ID = "COLE_SEU_CHAT_ID_AQUI"
+DERIV_API_KEY = "UEISANwBEI9sPVR"
+TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
+CHAT_ID = "2055716345"
 
 # ==================================================
 # ⚙️ CONFIGURAÇÕES
