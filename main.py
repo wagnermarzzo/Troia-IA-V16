@@ -5,9 +5,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ================= CONFIG FIXA =================
-DERIV_API_KEY = os.getenv("DERIV_API_KEY")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DERIV_API_KEY = os.getenv("UEISANwBEI9sPVR")
+TELEGRAM_TOKEN = os.getenv("8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU")
+CHAT_ID = os.getenv("2055716345")
 
 TIMEFRAME = 60
 CANDLES = 30
