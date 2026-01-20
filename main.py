@@ -6,7 +6,7 @@ import requests
 from datetime import datetime, timezone, timedelta
 
 # =============================
-# CONFIG FIXA
+# CONFIG
 # =============================
 DERIV_WS = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 DERIV_API_TOKEN = "UEISANwBEI9sPVR"
@@ -19,34 +19,44 @@ ANALISE_SEGUNDO = 55
 RESULT_DELAY = 90
 
 # =============================
+# ATIVOS DERIV (FOREX + OTC)
+# =============================
+ATIVOS = [
+    # FOREX
+    "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD","frxUSDCAD",
+    "frxEURJPY","frxEURGBP","frxGBPJPY","frxAUDJPY","frxCADJPY",
+    "frxCHFJPY","frxNZDUSD","frxNZDJPY","frxEURAUD","frxEURCHF",
+    "frxEURCAD","frxGBPAUD","frxGBPCAD","frxGBPCHF",
+    # OTC
+    "frxEURUSD_otc","frxGBPUSD_otc","frxUSDJPY_otc","frxAUDUSD_otc",
+    "frxEURJPY_otc","frxEURGBP_otc","frxGBPJPY_otc","frxAUDJPY_otc"
+]
+
+# =============================
 # ESTADO
 # =============================
 sinal_ativo = False
-ultimo_candle = {}
 historico = {"green": 0, "red": 0}
 confianca = 63.0
-
-# =============================
-# ATIVOS DERIV
-# =============================
-ATIVOS = [
-    "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD",
-    "frxEURJPY", "frxEURGBP", "frxGBPJPY",
-    "frxEURUSD_otc", "frxGBPUSD_otc", "frxUSDJPY_otc",
-    "frxAUDUSD_otc", "frxEURJPY_otc"
-]
+ultimo_candle = None
+ativo_idx = 0
+ws_app = None
 
 # =============================
 # TELEGRAM
 # =============================
 def tg(msg):
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
-    )
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+            timeout=5
+        )
+    except:
+        pass
 
 # =============================
-# IA EVOLUTIVA
+# IA
 # =============================
 def atualizar_ia(res):
     global confianca
@@ -54,77 +64,74 @@ def atualizar_ia(res):
     confianca = max(50, min(90, confianca))
 
 # =============================
-# ANALISE REAL
+# WS
 # =============================
-def direcao_candle(o, c):
-    return "CALL" if c > o else "PUT"
+def subscribe(ws):
+    global ultimo_candle
+    ultimo_candle = None
+    ws.send(json.dumps({
+        "candles": ATIVOS[ativo_idx],
+        "granularity": TIMEFRAME,
+        "count": 2,
+        "subscribe": 1
+    }))
 
-# =============================
-# WEBSOCKET CALLBACKS
-# =============================
 def on_open(ws):
-    auth = {"authorize": DERIV_API_TOKEN}
-    ws.send(json.dumps(auth))
+    ws.send(json.dumps({"authorize": DERIV_API_TOKEN}))
 
 def on_message(ws, msg):
     global ultimo_candle
     data = json.loads(msg)
 
     if "authorize" in data:
-        ativo = ATIVOS[int(time.time()) % len(ATIVOS)]
-        ws.send(json.dumps({
-            "candles": ativo,
-            "granularity": TIMEFRAME,
-            "count": 2,
-            "subscribe": 1
-        }))
+        subscribe(ws)
 
     if "candles" in data:
         candles = data["candles"]
         if len(candles) >= 2:
             ultimo_candle = candles[-2]
 
-def on_close(ws, close_status_code, close_msg):
-    time.sleep(5)
+def on_close(ws, code, reason):
+    time.sleep(3)
     start_ws()
 
 def on_error(ws, error):
-    print("WS Error:", error)
+    print("WS error:", error)
 
 # =============================
-# LOOP DE SINAL
+# LOOP
 # =============================
 def loop_sinal():
-    global sinal_ativo
+    global sinal_ativo, ativo_idx
 
-    tg("🤖 <b>Troia IA ONLINE</b>\n📡 WebSocket Deriv REAL\n⏱ Timeframe: 1M")
+    tg("🤖 <b>Troia IA ONLINE</b>\n📡 Deriv REAL\n⏱ Timeframe 1M")
 
     while True:
         if not ultimo_candle or sinal_ativo:
-            time.sleep(1)
+            time.sleep(0.5)
             continue
 
         agora = datetime.now(timezone.utc)
         if agora.second != ANALISE_SEGUNDO:
-            time.sleep(1)
+            time.sleep(0.5)
             continue
 
         o = float(ultimo_candle["open"])
         c = float(ultimo_candle["close"])
 
-        direcao = direcao_candle(o, c)
+        direcao = "CALL" if c > o else "PUT"
         entrada = (agora + timedelta(seconds=5)).strftime("%H:%M:%S")
 
         sinal_ativo = True
 
         tg(
             f"📊 <b>SINAL ENCONTRADO</b>\n\n"
-            f"📌 Ativo: <b>{ultimo_candle['symbol']}</b>\n"
+            f"📌 Ativo: <b>{ATIVOS[ativo_idx]}</b>\n"
             f"📈 Direção: <b>{direcao}</b>\n"
-            f"⏱ Timeframe: <b>1M</b>\n"
-            f"🧠 Estratégia: <b>Price Action</b>\n"
-            f"🕒 Entrada: <b>Próxima vela {entrada}</b>\n"
-            f"🎯 Confiança: <b>{confianca:.1f}%</b>"
+            f"⏱ Timeframe: 1M\n"
+            f"🧠 Estratégia: Price Action\n"
+            f"🕒 Entrada: Próxima vela {entrada}\n"
+            f"🎯 Confiança: {confianca:.1f}%"
         )
 
         time.sleep(RESULT_DELAY)
@@ -138,16 +145,16 @@ def loop_sinal():
 
         tg(
             f"{'💸 GREEN' if resultado == 'GREEN' else '🧨 RED'}\n\n"
-            f"📊 Resultado confirmado\n"
             f"📈 Greens: {historico['green']} | Reds: {historico['red']}\n"
-            f"🧠 Nova confiança IA: {confianca:.1f}%"
+            f"🧠 Confiança IA: {confianca:.1f}%"
         )
 
+        ativo_idx = (ativo_idx + 1) % len(ATIVOS)
         sinal_ativo = False
-        time.sleep(5)
+        time.sleep(3)
 
 # =============================
-# START WS
+# START
 # =============================
 def start_ws():
     ws = websocket.WebSocketApp(
@@ -159,9 +166,6 @@ def start_ws():
     )
     ws.run_forever()
 
-# =============================
-# MAIN
-# =============================
 if __name__ == "__main__":
     threading.Thread(target=start_ws, daemon=True).start()
     loop_sinal()
