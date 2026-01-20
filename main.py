@@ -1,9 +1,8 @@
 # ======================================================
-# TROIA V20 - FASE 1 FINAL
-# Coleta de Candles 5M + Infra Estável
+# TROIA V20 - FASE 1 FINAL (RAILWAY SAFE)
 # ======================================================
 
-import websocket, json, time, sqlite3, threading, requests
+import websocket, json, time, sqlite3, threading, requests, os
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -41,7 +40,7 @@ def tg(msg):
         pass
 
 # ===============================
-# KEEP ALIVE HTTP (Railway)
+# KEEP ALIVE HTTP (PORT DINÂMICA)
 # ===============================
 def keep_alive():
     class Handler(BaseHTTPRequestHandler):
@@ -54,7 +53,8 @@ def keep_alive():
         def log_message(self, format, *args):
             return
 
-    server = HTTPServer(("0.0.0.0", 8080), Handler)
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), Handler)
     server.serve_forever()
 
 # ===============================
@@ -115,7 +115,6 @@ def heartbeat():
 # ===============================
 def on_message(ws, message):
     data = json.loads(message)
-
     if "candles" in data:
         ativo = data.get("echo_req", {}).get("ticks_history")
         for c in data["candles"]:
@@ -123,7 +122,6 @@ def on_message(ws, message):
 
 def on_open(ws):
     ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-
     for ativo in ATIVOS:
         ws.send(json.dumps({
             "ticks_history": ativo,
