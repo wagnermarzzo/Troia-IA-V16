@@ -7,9 +7,9 @@ from datetime import datetime, timedelta, timezone
 DERIV_API_KEY = "UEISANwBEI9sPVR"
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
-CONF_MIN = 50
+CONF_MIN = 55
 TIMEFRAME = 60  # 1 minuto
-NUM_CANDLES_ANALISE = 20  # análise últimos 20 candles (20 minutos)
+NUM_CANDLES_ANALISE = 20  # últimos 20 candles
 
 # ===============================
 # LISTA COMPLETA DE ATIVOS
@@ -57,12 +57,11 @@ def direcao_candle(candle):
     return "CALL" if candle["close"] > candle["open"] else "PUT"
 
 def calcular_confianca(candles):
-    # Confiança baseada na tendência das últimas NUM_CANDLES_ANALISE velas
     call = sum(1 for c in candles if c["close"] > c["open"])
     put = sum(1 for c in candles if c["close"] < c["open"])
     total = len(candles)
     maior = max(call, put)
-    return max(CONF_MIN, int(maior/total*100))  # mínimo CONF_MIN=55%
+    return max(CONF_MIN, int(maior/total*100))
 
 # ===============================
 # WS RESULTADO
@@ -79,6 +78,7 @@ def ws_resultado(ativo,direcao):
                 c = data["candles"][-1]
                 green = (direcao=="CALL" and c["close"]>c["open"]) or (direcao=="PUT" and c["close"]<c["open"])
                 tg(f"{'💸 GREEN' if green else '🧨 RED'} — {ativo}")
+                # Reset estado
                 estado["ativo"]=None
                 estado["direcao"]=None
                 estado["entrada"]=None
@@ -127,15 +127,18 @@ def ws_analise_ativo(ativo):
                 if conf<CONF_MIN:
                     ws.close()
                     return
+                # Preencher estado e lock
                 estado["ativo"]=ativo
                 estado["direcao"]=direcao_candle(candles[-1])
                 estado["aguardando_resultado"]=True
                 agora=datetime.now(timezone.utc)
                 entrada=(agora+timedelta(minutes=1)).replace(second=0,microsecond=0)
                 estado["entrada"]=entrada
+                # Enviar sinal 5 segundos antes da próxima vela
                 envio=entrada-timedelta(seconds=5)
                 while datetime.now(timezone.utc)<envio: time.sleep(0.2)
                 tg(painel(ativo,estado["direcao"],entrada.strftime("%H:%M:%S"),conf))
+                # Esperar fechamento da vela
                 fechamento=entrada+timedelta(minutes=1)
                 while datetime.now(timezone.utc)<fechamento: time.sleep(0.5)
                 ws_resultado(ativo,estado["direcao"])
@@ -161,6 +164,7 @@ def ws_analise_ativo(ativo):
 # START
 # ===============================
 tg("🤖 <b>Troia IA ONLINE</b>\n📡 Mercado REAL Deriv\n⏱ Timeframe 1M\n💡 Análise últimos 20 candles, CONF_MIN 55")
+
 while True:
     for ativo in ATIVOS:
-        ws_analise_ativo(ativo)
+        ws_analise_ativo(ativo)  # ⚡ 1 ativo por vez → envia sinal e aguarda resultado antes de passar para o próximo
