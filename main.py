@@ -16,7 +16,7 @@ CONF_MIN = 60
 TIMEFRAME = 60  # 1 minuto
 
 # ===============================
-# LISTA DE ATIVOS
+# LISTA DE ATIVOS (Deriv + OTC)
 # ===============================
 ATIVOS = [
     "frxEURUSD","frxGBPUSD","frxUSDJPY","frxUSDCHF",
@@ -83,120 +83,127 @@ def calcular_confianca(c):
 # WS RESULTADO
 # ===============================
 def ws_resultado():
-    def on_open(ws):
-        tg_log("WS Resultado conectado")
-        ws.send(json.dumps({"authorize": DERIV_API_KEY}))
+    while True:
+        try:
+            def on_open(ws):
+                tg_log("WS Resultado conectado")
+                ws.send(json.dumps({"authorize": DERIV_API_KEY}))
 
-    def on_message(ws, msg):
-        data = json.loads(msg)
-        if "candles" not in data:
-            return
+            def on_message(ws, msg):
+                data = json.loads(msg)
+                if "candles" not in data:
+                    return
 
-        c = data["candles"][-1]
-        ativo = estado["ativo"]
-        direcao = estado["direcao"]
+                c = data["candles"][-1]
+                ativo = estado["ativo"]
+                direcao = estado["direcao"]
 
-        green = (
-            (direcao == "CALL" and c["close"] > c["open"]) or
-            (direcao == "PUT" and c["close"] < c["open"])
-        )
+                green = (
+                    (direcao == "CALL" and c["close"] > c["open"]) or
+                    (direcao == "PUT" and c["close"] < c["open"])
+                )
 
-        tg(f"{'💸 GREEN' if green else '🧨 RED'} — {ativo}")
+                tg(f"{'💸 GREEN' if green else '🧨 RED'} — {ativo}")
 
-        estado["ativo"] = None
-        estado["direcao"] = None
-        estado["entrada"] = None
-        estado["aguardando_resultado"] = False
+                estado["ativo"] = None
+                estado["direcao"] = None
+                estado["entrada"] = None
+                estado["aguardando_resultado"] = False
 
-        ws.close()
+                ws.close()
 
-    def on_close(ws, close_status_code=None, close_msg=None):
-        tg_log("WS Resultado caiu, reconectando em 5s...")
-        time.sleep(5)
-        threading.Thread(target=ws_resultado).start()
+            def on_close(ws, close_status_code=None, close_msg=None):
+                tg_log("WS Resultado caiu, reconectando em 5s...")
+                time.sleep(5)
 
-    def on_error(ws, error):
-        tg_log(f"WS Resultado erro: {error}")
+            def on_error(ws, error):
+                tg_log(f"WS Resultado erro: {error}")
 
-    ws = websocket.WebSocketApp(
-        "wss://ws.derivws.com/websockets/v3?app_id=1089",
-        on_open=on_open,
-        on_message=on_message,
-        on_close=on_close,
-        on_error=on_error
-    )
-    ws.run_forever()
+            ws = websocket.WebSocketApp(
+                "wss://ws.derivws.com/websockets/v3?app_id=1089",
+                on_open=on_open,
+                on_message=on_message,
+                on_close=on_close,
+                on_error=on_error
+            )
+            ws.run_forever()
+        except Exception as e:
+            tg_log(f"Erro WS Resultado, reconectando: {e}")
+            time.sleep(5)
 
 # ===============================
 # WS ANALISE
 # ===============================
 def ws_analise():
     global ULTIMO_STATUS
+    while True:
+        try:
+            def on_open(ws):
+                tg_log("WS Análise conectado")
+                ws.send(json.dumps({"authorize": DERIV_API_KEY}))
+                for a in ATIVOS:
+                    ws.send(json.dumps({
+                        "ticks_history": a,
+                        "style": "candles",
+                        "count": 10,
+                        "granularity": TIMEFRAME
+                    }))
 
-    def on_open(ws):
-        tg_log("WS Análise conectado")
-        ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-        for a in ATIVOS:
-            ws.send(json.dumps({
-                "ticks_history": a,
-                "style": "candles",
-                "count": 10,
-                "granularity": TIMEFRAME
-            }))
+            def on_message(ws, msg):
+                global ULTIMO_STATUS
+                data = json.loads(msg)
+                if "candles" not in data or estado["aguardando_resultado"]:
+                    return
 
-    def on_message(ws, msg):
-        global ULTIMO_STATUS
-        data = json.loads(msg)
-        if "candles" not in data or estado["aguardando_resultado"]:
-            return
+                ativo = data["echo_req"]["ticks_history"]
+                candle = data["candles"][-1]
 
-        ativo = data["echo_req"]["ticks_history"]
-        candle = data["candles"][-1]
+                conf = calcular_confianca(candle)
+                if conf < CONF_MIN:
+                    agora = time.time()
+                    if agora - ULTIMO_STATUS > 300:
+                        tg("🔍 <b>Analisando mercado, aguarde...</b>")
+                        ULTIMO_STATUS = agora
+                    return
 
-        conf = calcular_confianca(candle)
-        if conf < CONF_MIN:
-            agora = time.time()
-            if agora - ULTIMO_STATUS > 300:
-                tg("🔍 <b>Analisando mercado, aguarde...</b>")
-                ULTIMO_STATUS = agora
-            return
+                estado["ativo"] = ativo
+                estado["direcao"] = direcao_candle(candle)
+                estado["aguardando_resultado"] = True
 
-        estado["ativo"] = ativo
-        estado["direcao"] = direcao_candle(candle)
-        estado["aguardando_resultado"] = True
+                agora = datetime.now(timezone.utc)
+                entrada = (agora + timedelta(minutes=1)).replace(second=0, microsecond=0)
+                estado["entrada"] = entrada
 
-        agora = datetime.now(timezone.utc)
-        entrada = (agora + timedelta(minutes=1)).replace(second=0, microsecond=0)
-        estado["entrada"] = entrada
+                envio = entrada - timedelta(seconds=5)
+                while datetime.now(timezone.utc) < envio:
+                    time.sleep(0.2)
 
-        envio = entrada - timedelta(seconds=5)
-        while datetime.now(timezone.utc) < envio:
-            time.sleep(0.2)
+                tg(painel(ativo, estado["direcao"], entrada.strftime("%H:%M:%S"), conf))
 
-        tg(painel(ativo, estado["direcao"], entrada.strftime("%H:%M:%S"), conf))
+                fechamento = entrada + timedelta(minutes=1)
+                while datetime.now(timezone.utc) < fechamento:
+                    time.sleep(0.5)
 
-        fechamento = entrada + timedelta(minutes=1)
-        while datetime.now(timezone.utc) < fechamento:
-            time.sleep(0.5)
+                threading.Thread(target=ws_resultado).start()
 
-        threading.Thread(target=ws_resultado).start()
+            def on_close(ws, close_status_code=None, close_msg=None):
+                tg_log("WS Análise caiu, reconectando em 5s...")
+                time.sleep(5)
 
-    def on_close(ws, close_status_code=None, close_msg=None):
-        tg_log("WS Análise caiu, reconectando em 5s...")
-        time.sleep(5)
-        threading.Thread(target=ws_analise).start()
+            def on_error(ws, error):
+                tg_log(f"WS Análise erro: {error}")
 
-    def on_error(ws, error):
-        tg_log(f"WS Análise erro: {error}")
-
-    ws = websocket.WebSocketApp(
-        "wss://ws.derivws.com/websockets/v3?app_id=1089",
-        on_open=on_open,
-        on_message=on_message,
-        on_close=on_close,
-        on_error=on_error
-    )
-    ws.run_forever()
+            ws = websocket.WebSocketApp(
+                "wss://ws.derivws.com/websockets/v3?app_id=1089",
+                on_open=on_open,
+                on_message=on_message,
+                on_close=on_close,
+                on_error=on_error
+            )
+            ws.run_forever()
+        except Exception as e:
+            tg_log(f"Erro WS Análise, reconectando: {e}")
+            time.sleep(5)
 
 # ===============================
 # START
