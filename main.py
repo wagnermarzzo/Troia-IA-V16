@@ -7,8 +7,9 @@ from datetime import datetime, timedelta, timezone
 DERIV_API_KEY = "UEISANwBEI9sPVR"
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
-CONF_MIN = 55
+CONF_MIN = 50
 TIMEFRAME = 60  # 1 minuto
+NUM_CANDLES_ANALISE = 20  # análise últimos 20 candles (20 minutos)
 
 # ===============================
 # LISTA COMPLETA DE ATIVOS
@@ -52,11 +53,16 @@ def painel(ativo,direcao,hora,conf):
 # ===============================
 # DIREÇÃO E CONFIANÇA
 # ===============================
-def direcao_candle(c):
-    return "CALL" if c["close"] > c["open"] else "PUT"
+def direcao_candle(candle):
+    return "CALL" if candle["close"] > candle["open"] else "PUT"
 
-def calcular_confianca(c):
-    return min(85,max(55,int(abs(c["close"]-c["open"])*10000)))
+def calcular_confianca(candles):
+    # Confiança baseada na tendência das últimas NUM_CANDLES_ANALISE velas
+    call = sum(1 for c in candles if c["close"] > c["open"])
+    put = sum(1 for c in candles if c["close"] < c["open"])
+    total = len(candles)
+    maior = max(call, put)
+    return max(CONF_MIN, int(maior/total*100))  # mínimo CONF_MIN=55%
 
 # ===============================
 # WS RESULTADO
@@ -106,18 +112,23 @@ def ws_analise_ativo(ativo):
         try:
             def on_open(ws):
                 ws.send(json.dumps({"authorize":DERIV_API_KEY}))
-                ws.send(json.dumps({"ticks_history":ativo,"style":"candles","count":10,"granularity":TIMEFRAME}))
+                ws.send(json.dumps({
+                    "ticks_history":ativo,
+                    "style":"candles",
+                    "count":NUM_CANDLES_ANALISE,
+                    "granularity":TIMEFRAME
+                }))
 
             def on_message(ws,msg):
                 data = json.loads(msg)
                 if "candles" not in data or estado["aguardando_resultado"]: return
-                candle = data["candles"][-1]
-                conf = calcular_confianca(candle)
+                candles = data["candles"][-NUM_CANDLES_ANALISE:]
+                conf = calcular_confianca(candles)
                 if conf<CONF_MIN:
                     ws.close()
                     return
                 estado["ativo"]=ativo
-                estado["direcao"]=direcao_candle(candle)
+                estado["direcao"]=direcao_candle(candles[-1])
                 estado["aguardando_resultado"]=True
                 agora=datetime.now(timezone.utc)
                 entrada=(agora+timedelta(minutes=1)).replace(second=0,microsecond=0)
@@ -149,7 +160,7 @@ def ws_analise_ativo(ativo):
 # ===============================
 # START
 # ===============================
-tg("🤖 <b>Troia IA ONLINE</b>\n📡 Mercado REAL Deriv\n⏱ Timeframe 1M")
+tg("🤖 <b>Troia IA ONLINE</b>\n📡 Mercado REAL Deriv\n⏱ Timeframe 1M\n💡 Análise últimos 20 candles, CONF_MIN 55")
 while True:
     for ativo in ATIVOS:
         ws_analise_ativo(ativo)
