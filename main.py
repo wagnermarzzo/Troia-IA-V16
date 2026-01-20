@@ -1,4 +1,4 @@
-import websocket, json, time, threading, requests
+import websocket, json, time, requests
 from datetime import datetime, timedelta, timezone
 
 # ===============================
@@ -7,9 +7,8 @@ from datetime import datetime, timedelta, timezone
 DERIV_API_KEY = "UEISANwBEI9sPVR"
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
-CONF_MIN = 40
+CONF_MIN = 55
 TIMEFRAME = 60  # 1 minuto
-BATCH_SIZE = 3  # ativos por WS
 
 # ===============================
 # LISTA COMPLETA DE ATIVOS
@@ -25,7 +24,6 @@ ATIVOS = [
 # ESTADO GLOBAL
 # ===============================
 estado = {"ativo": None, "direcao": None, "entrada": None, "aguardando_resultado": False}
-ULTIMO_STATUS = 0
 
 # ===============================
 # FUNÇÕES TELEGRAM
@@ -63,7 +61,7 @@ def calcular_confianca(c):
 # ===============================
 # WS RESULTADO
 # ===============================
-def ws_resultado():
+def ws_resultado(ativo,direcao):
     while True:
         try:
             def on_open(ws):
@@ -73,8 +71,6 @@ def ws_resultado():
                 data = json.loads(msg)
                 if "candles" not in data: return
                 c = data["candles"][-1]
-                ativo = estado["ativo"]
-                direcao = estado["direcao"]
                 green = (direcao=="CALL" and c["close"]>c["open"]) or (direcao=="PUT" and c["close"]<c["open"])
                 tg(f"{'💸 GREEN' if green else '🧨 RED'} — {ativo}")
                 estado["ativo"]=None
@@ -100,24 +96,26 @@ def ws_resultado():
             time.sleep(5)
 
 # ===============================
-# WS ANALISE POR LOTES
+# WS ANALISE ATIVO
 # ===============================
-def ws_analise_lote(lote):
+def ws_analise_ativo(ativo):
     while True:
+        if estado["aguardando_resultado"]:
+            time.sleep(1)
+            continue
         try:
             def on_open(ws):
                 ws.send(json.dumps({"authorize":DERIV_API_KEY}))
-                for a in lote:
-                    ws.send(json.dumps({"ticks_history":a,"style":"candles","count":10,"granularity":TIMEFRAME}))
+                ws.send(json.dumps({"ticks_history":ativo,"style":"candles","count":10,"granularity":TIMEFRAME}))
 
             def on_message(ws,msg):
-                global ULTIMO_STATUS
                 data = json.loads(msg)
                 if "candles" not in data or estado["aguardando_resultado"]: return
-                ativo = data["echo_req"]["ticks_history"]
                 candle = data["candles"][-1]
                 conf = calcular_confianca(candle)
-                if conf<CONF_MIN: return
+                if conf<CONF_MIN:
+                    ws.close()
+                    return
                 estado["ativo"]=ativo
                 estado["direcao"]=direcao_candle(candle)
                 estado["aguardando_resultado"]=True
@@ -129,7 +127,8 @@ def ws_analise_lote(lote):
                 tg(painel(ativo,estado["direcao"],entrada.strftime("%H:%M:%S"),conf))
                 fechamento=entrada+timedelta(minutes=1)
                 while datetime.now(timezone.utc)<fechamento: time.sleep(0.5)
-                threading.Thread(target=ws_resultado).start()
+                ws_resultado(ativo,estado["direcao"])
+                ws.close()
 
             def on_close(ws,*args):
                 time.sleep(5)
@@ -151,6 +150,6 @@ def ws_analise_lote(lote):
 # START
 # ===============================
 tg("🤖 <b>Troia IA ONLINE</b>\n📡 Mercado REAL Deriv\n⏱ Timeframe 1M")
-for i in range(0,len(ATIVOS),BATCH_SIZE):
-    lote = ATIVOS[i:i+BATCH_SIZE]
-    threading.Thread(target=ws_analise_lote,args=(lote,)).start()
+while True:
+    for ativo in ATIVOS:
+        ws_analise_ativo(ativo)
