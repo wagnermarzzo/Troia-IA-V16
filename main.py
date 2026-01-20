@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 DERIV_API_KEY = "UEISANwBEI9sPVR"
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
-CONF_MIN = 60
+CONF_MIN = 40
 TIMEFRAME = 60  # 1 minuto
 BATCH_SIZE = 3  # ativos por WS
 
@@ -36,10 +36,6 @@ def tg(msg):
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             data={"chat_id": TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML"}, timeout=5)
     except: pass
-
-def tg_log(msg):
-    tg(f"🖥 <b>LOG:</b> {msg}")
-    print(msg)
 
 # ===============================
 # PAINEL PROFISSIONAL
@@ -71,7 +67,6 @@ def ws_resultado():
     while True:
         try:
             def on_open(ws):
-                tg_log("WS Resultado conectado")
                 ws.send(json.dumps({"authorize":DERIV_API_KEY}))
 
             def on_message(ws,msg):
@@ -89,11 +84,10 @@ def ws_resultado():
                 ws.close()
 
             def on_close(ws,*args):
-                tg_log("WS Resultado caiu, reconectando em 5s...")
                 time.sleep(5)
 
             def on_error(ws,error):
-                tg_log(f"WS Resultado erro: {error}")
+                time.sleep(3)
 
             ws = websocket.WebSocketApp(
                 "wss://ws.derivws.com/websockets/v3?app_id=1089",
@@ -102,8 +96,7 @@ def ws_resultado():
                 on_close=on_close,
                 on_error=on_error)
             ws.run_forever()
-        except Exception as e:
-            tg_log(f"Erro WS Resultado, reconectando: {e}")
+        except:
             time.sleep(5)
 
 # ===============================
@@ -113,7 +106,6 @@ def ws_analise_lote(lote):
     while True:
         try:
             def on_open(ws):
-                tg_log(f"WS Análise lote {lote} conectado")
                 ws.send(json.dumps({"authorize":DERIV_API_KEY}))
                 for a in lote:
                     ws.send(json.dumps({"ticks_history":a,"style":"candles","count":10,"granularity":TIMEFRAME}))
@@ -125,12 +117,7 @@ def ws_analise_lote(lote):
                 ativo = data["echo_req"]["ticks_history"]
                 candle = data["candles"][-1]
                 conf = calcular_confianca(candle)
-                if conf<CONF_MIN:
-                    agora=time.time()
-                    if agora-ULTIMO_STATUS>300:
-                        tg("🔍 <b>Analisando mercado, aguarde...</b>")
-                        ULTIMO_STATUS=agora
-                    return
+                if conf<CONF_MIN: return
                 estado["ativo"]=ativo
                 estado["direcao"]=direcao_candle(candle)
                 estado["aguardando_resultado"]=True
@@ -145,11 +132,10 @@ def ws_analise_lote(lote):
                 threading.Thread(target=ws_resultado).start()
 
             def on_close(ws,*args):
-                tg_log(f"WS Análise lote {lote} caiu, reconectando em 5s...")
                 time.sleep(5)
 
             def on_error(ws,error):
-                tg_log(f"WS Análise lote {lote} erro: {error}")
+                time.sleep(3)
 
             ws=websocket.WebSocketApp(
                 "wss://ws.derivws.com/websockets/v3?app_id=1089",
@@ -158,15 +144,13 @@ def ws_analise_lote(lote):
                 on_close=on_close,
                 on_error=on_error)
             ws.run_forever()
-        except Exception as e:
-            tg_log(f"Erro WS Análise lote {lote}, reconectando: {e}")
+        except:
             time.sleep(5)
 
 # ===============================
 # START
 # ===============================
 tg("🤖 <b>Troia IA ONLINE</b>\n📡 Mercado REAL Deriv\n⏱ Timeframe 1M")
-# Criar threads para lotes de ativos
 for i in range(0,len(ATIVOS),BATCH_SIZE):
     lote = ATIVOS[i:i+BATCH_SIZE]
     threading.Thread(target=ws_analise_lote,args=(lote,)).start()
