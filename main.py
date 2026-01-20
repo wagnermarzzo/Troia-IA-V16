@@ -1,7 +1,7 @@
 import websocket, json, time, requests, threading, sqlite3
 from datetime import datetime, timezone
 from collections import defaultdict
-from flask import Flask
+from flask import Flask, render_template_string
 
 # ===============================
 # CONFIG FIXA
@@ -17,10 +17,10 @@ ATIVOS = [
 
 TIMEFRAME = 300
 CANDLES_ANALISE = 100
-RESULT_WAIT = 310  # aguarda fechamento da vela 5M
+RESULT_WAIT = 310
 
 # ===============================
-# BANCO DE DADOS
+# BANCO
 # ===============================
 conn = sqlite3.connect("troia_v21.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -88,33 +88,27 @@ def padrao(c):
     return None
 
 # ===============================
-# REGISTRAR SINAL
+# BANCO HELPERS
 # ===============================
 def salvar_sinal(ativo, tendencia_, padrao_, direcao):
     cursor.execute(
-        "INSERT INTO sinais (data, ativo, tendencia, padrao, direcao, resultado) VALUES (?,?,?,?,?,?)",
+        "INSERT INTO sinais VALUES (NULL,?,?,?,?,?)",
         (datetime.now(timezone.utc).isoformat(), ativo, tendencia_, padrao_, direcao, "PENDENTE")
     )
     conn.commit()
     return cursor.lastrowid
 
-def atualizar_resultado(sinal_id, resultado):
-    cursor.execute(
-        "UPDATE sinais SET resultado=? WHERE id=?",
-        (resultado, sinal_id)
-    )
+def atualizar_resultado(id_, res):
+    cursor.execute("UPDATE sinais SET resultado=? WHERE id=?", (res, id_))
     conn.commit()
 
-# ===============================
-# RESULTADO REAL
-# ===============================
 def resultado_real(ativo, direcao):
     candle = pegar_candles(ativo, 1)[-1]
     real = "CALL" if candle["close"] > candle["open"] else "PUT"
     return "GREEN" if real == direcao else "RED"
 
 # ===============================
-# ANALISAR ATIVO
+# ANALISAR
 # ===============================
 def analisar_ativo(ativo):
     candles = pegar_candles(ativo)
@@ -131,30 +125,25 @@ def analisar_ativo(ativo):
     sinal_id = salvar_sinal(ativo, t, p, direcao)
 
     tg(
-        f"🚀 <b>TROIA v21 — SINAL</b>\n"
+        f"🚀 <b>TROIA v21</b>\n"
         f"📊 {ativo}\n"
-        f"📈 Tendência: {t}\n"
-        f"🔥 Padrão: {p}\n"
-        f"🎯 Direção: {direcao}\n"
-        f"⏱ Entrada: Agora / Próx. vela 5M"
+        f"📈 {t}\n"
+        f"🔥 {p}\n"
+        f"🎯 {direcao}\n"
+        f"⏱ Entrada: Agora / Próx. 5M"
     )
 
     time.sleep(RESULT_WAIT)
     res = resultado_real(ativo, direcao)
     atualizar_resultado(sinal_id, res)
 
-    tg(
-        f"🧾 <b>RESULTADO</b>\n"
-        f"📊 {ativo}\n"
-        f"🎯 {direcao}\n"
-        f"✅ {res}"
-    )
+    tg(f"🧾 <b>RESULTADO</b>\n{ativo}\n{direcao}\n{res}")
 
 # ===============================
 # LOOP
 # ===============================
 def loop():
-    tg("🧠 TROIA v21 — FASE 2 (MEMÓRIA ATIVA)")
+    tg("🧠 TROIA v21 — FASE 2.1 (PAINEL ATIVO)")
     while True:
         for ativo in ATIVOS:
             try:
@@ -164,20 +153,54 @@ def loop():
                 time.sleep(3)
 
 # ===============================
-# HTTP KEEP ALIVE
+# PAINEL WEB
 # ===============================
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return "Troia v21 Fase 2 Online"
+HTML = """
+<!doctype html>
+<title>Troia v21</title>
+<h1>🚀 Troia v21 - Painel</h1>
+<p>Status: <b>ONLINE</b></p>
+<p>Total sinais: {{total}}</p>
+<p>Greens: {{greens}}</p>
+<p>Reds: {{reds}}</p>
+<p>Winrate: {{winrate}}%</p>
+<p>Último sinal: {{ultimo}}</p>
+"""
 
-def start():
-    threading.Thread(target=loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=8080)
+@app.route("/")
+def painel():
+    cursor.execute("SELECT COUNT(*) FROM sinais")
+    total = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM sinais WHERE resultado='GREEN'")
+    greens = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM sinais WHERE resultado='RED'")
+    reds = cursor.fetchone()[0]
+
+    winrate = round((greens / total) * 100, 2) if total > 0 else 0
+
+    cursor.execute("SELECT ativo || ' ' || direcao || ' ' || resultado FROM sinais ORDER BY id DESC LIMIT 1")
+    u = cursor.fetchone()
+    ultimo = u[0] if u else "Nenhum"
+
+    return render_template_string(
+        HTML,
+        total=total,
+        greens=greens,
+        reds=reds,
+        winrate=winrate,
+        ultimo=ultimo
+    )
 
 # ===============================
 # START
 # ===============================
+def start():
+    threading.Thread(target=loop, daemon=True).start()
+    app.run(host="0.0.0.0", port=8080)
+
 if __name__ == "__main__":
     start()
