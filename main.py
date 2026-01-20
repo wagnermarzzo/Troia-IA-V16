@@ -6,17 +6,17 @@ import requests
 from datetime import datetime, timedelta, timezone
 
 # ===============================
-# CONFIG FIXA
+# CONFIGURAÇÃO FIXA
 # ===============================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 CONF_MIN = 60
-TIMEFRAME = 60
+TIMEFRAME = 60  # 1 minuto
 
 # ===============================
-# ATIVOS COMPLETOS
+# LISTA DE ATIVOS
 # ===============================
 ATIVOS = [
     "frxEURUSD","frxGBPUSD","frxUSDJPY","frxUSDCHF",
@@ -51,8 +51,12 @@ def tg(msg):
     except:
         pass
 
+def tg_log(msg):
+    tg(f"🖥 <b>LOG:</b> {msg}")
+    print(msg)
+
 # ===============================
-# PAINEL
+# PAINEL PROFISSIONAL
 # ===============================
 def painel(ativo, direcao, hora, conf):
     return f"""
@@ -67,7 +71,7 @@ def painel(ativo, direcao, hora, conf):
 """
 
 # ===============================
-# DIREÇÃO CANDLE
+# FUNÇÕES DE CANDLE
 # ===============================
 def direcao_candle(c):
     return "CALL" if c["close"] > c["open"] else "PUT"
@@ -80,6 +84,7 @@ def calcular_confianca(c):
 # ===============================
 def ws_resultado():
     def on_open(ws):
+        tg_log("WS Resultado conectado")
         ws.send(json.dumps({"authorize": DERIV_API_KEY}))
 
     def on_message(ws, msg):
@@ -106,15 +111,19 @@ def ws_resultado():
         ws.close()
 
     def on_close(ws, close_status_code=None, close_msg=None):
-        print("WS Resultado caiu, reconectando...")
+        tg_log("WS Resultado caiu, reconectando em 5s...")
         time.sleep(5)
-        ws_resultado()
+        threading.Thread(target=ws_resultado).start()
+
+    def on_error(ws, error):
+        tg_log(f"WS Resultado erro: {error}")
 
     ws = websocket.WebSocketApp(
         "wss://ws.derivws.com/websockets/v3?app_id=1089",
         on_open=on_open,
         on_message=on_message,
-        on_close=on_close
+        on_close=on_close,
+        on_error=on_error
     )
     ws.run_forever()
 
@@ -125,6 +134,7 @@ def ws_analise():
     global ULTIMO_STATUS
 
     def on_open(ws):
+        tg_log("WS Análise conectado")
         ws.send(json.dumps({"authorize": DERIV_API_KEY}))
         for a in ATIVOS:
             ws.send(json.dumps({
@@ -171,20 +181,20 @@ def ws_analise():
 
         threading.Thread(target=ws_resultado).start()
 
-    def on_error(ws, error):
-        print("WS Análise erro:", error)
-
     def on_close(ws, close_status_code=None, close_msg=None):
-        print("WS Análise caiu, reconectando...")
+        tg_log("WS Análise caiu, reconectando em 5s...")
         time.sleep(5)
-        ws_analise()
+        threading.Thread(target=ws_analise).start()
+
+    def on_error(ws, error):
+        tg_log(f"WS Análise erro: {error}")
 
     ws = websocket.WebSocketApp(
         "wss://ws.derivws.com/websockets/v3?app_id=1089",
         on_open=on_open,
         on_message=on_message,
-        on_error=on_error,
-        on_close=on_close
+        on_close=on_close,
+        on_error=on_error
     )
     ws.run_forever()
 
@@ -192,4 +202,4 @@ def ws_analise():
 # START
 # ===============================
 tg("🤖 <b>Troia IA ONLINE</b>\n📡 Mercado REAL Deriv\n⏱ Timeframe 1M")
-ws_analise()
+threading.Thread(target=ws_analise).start()
