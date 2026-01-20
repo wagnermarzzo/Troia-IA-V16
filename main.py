@@ -1,4 +1,5 @@
 import websocket, json, time, requests
+from datetime import datetime, timezone
 
 # ===============================
 # CONFIGURAÇÃO
@@ -6,9 +7,16 @@ import websocket, json, time, requests
 DERIV_API_KEY = "UEISANwBEI9sPVR"
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
-ATIVO_TESTE = "frxEURUSD"  # Teste 1 ativo
+
+ATIVOS = [
+    "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD",
+    "frxUSDCAD", "frxUSDCHF", "frxNZDUSD", "frxEURGBP"
+]  # Lista de ativos reais
+
 NUM_CANDLES_ANALISE = 20
 TIMEFRAME = 60  # 1M
+CONF_MIN = 55  # confiança mínima para enviar sinal
+WAIT_AFTER_VELA = 65  # espera 1m05s para ler resultado
 
 # ===============================
 # TELEGRAM
@@ -19,8 +27,7 @@ def tg(msg):
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode":"HTML"}, timeout=5
         )
-    except:
-        pass
+    except: pass
 
 # ===============================
 # DIREÇÃO E CONFIANÇA
@@ -36,20 +43,16 @@ def calcular_confianca(candles):
     return int(maior/total*100)
 
 # ===============================
-# WS TESTE DEFINITIVO
+# ANALISA 1 ATIVO
 # ===============================
-def ws_teste():
+def analisar_ativo(ativo):
+    resultado_final = {"ativo": ativo, "sinal_enviado": False}
+
     def on_open(ws):
-        tg("🔄 WS aberto. Tentando autorização...")
-        # Autorizar API Key
         ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-
-        # Timestamp UTC atual para o end
         end_timestamp = int(time.time())
-
-        # Solicitar últimos 20 candles 1M
         ws.send(json.dumps({
-            "ticks_history": ATIVO_TESTE,
+            "ticks_history": ativo,
             "style": "candles",
             "granularity": TIMEFRAME,
             "count": NUM_CANDLES_ANALISE,
@@ -62,14 +65,26 @@ def ws_teste():
             candles = data["candles"][-NUM_CANDLES_ANALISE:]
             direcao = direcao_candle(candles[-1])
             conf = calcular_confianca(candles)
-            tg(f"✅ WS conectado corretamente!\nAtivo: {ATIVO_TESTE}\nÚltima direção: {direcao}\nConfiança últimos 20 candles: {conf}%\nTotal candles recebidos: {len(candles)}")
+
+            # Sinal apenas se confiança ≥ CONF_MIN
+            if conf >= CONF_MIN:
+                tg(f"💥 SINAL ENCONTRADO!\n"
+                   f"Ativo: {ativo}\n"
+                   f"Direção: {direcao}\n"
+                   f"Confiança: {conf}%\n"
+                   f"Timeframe: 1M\n"
+                   f"Entrada: próxima vela")
+                resultado_final["sinal_enviado"] = True
+                resultado_final["direcao"] = direcao
+
             ws.close()
 
     def on_error(ws, error):
         tg(f"❌ WS ERROR: {error}")
+        resultado_final["sinal_enviado"] = False
 
     def on_close(ws, *args):
-        tg("🔄 WS fechado.")
+        pass
 
     ws = websocket.WebSocketApp(
         "wss://ws.derivws.com/websockets/v3?app_id=1089",
@@ -79,9 +94,27 @@ def ws_teste():
         on_error=on_error
     )
     ws.run_forever()
+    return resultado_final
+
+# ===============================
+# LOOP PRINCIPAL
+# ===============================
+def loop_ativos():
+    tg("🤖 Troia V19 PRO FINAL iniciado. Analise 1 ativo por vez.")
+    while True:
+        for ativo in ATIVOS:
+            res = analisar_ativo(ativo)
+            if res.get("sinal_enviado"):
+                # Espera 1 vela fechar antes de passar para o próximo ativo
+                time.sleep(WAIT_AFTER_VELA)
+                # Confirmação resultado 💸 / 🧨
+                tg(f"🧾 RESULTADO SINAL {res['ativo']}: {res['direcao']} (verificar candle real)")
+            else:
+                # Nenhum sinal → passa para próximo ativo
+                time.sleep(2)
 
 # ===============================
 # START
 # ===============================
-tg("🤖 Teste WS definitivo com 'end' iniciado — frxEURUSD")
-ws_teste()
+if __name__ == "__main__":
+    loop_ativos()
