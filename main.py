@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, timezone
 # CONFIG FIXA
 # ===============================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
-
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
@@ -68,7 +67,7 @@ def painel(ativo, direcao, hora, conf):
 """
 
 # ===============================
-# ANALISE REAL
+# DIREÇÃO CANDLE
 # ===============================
 def direcao_candle(c):
     return "CALL" if c["close"] > c["open"] else "PUT"
@@ -77,7 +76,7 @@ def calcular_confianca(c):
     return min(85, max(55, int(abs(c["close"] - c["open"]) * 10000)))
 
 # ===============================
-# WS RESULTADO (SEPARADO)
+# WS RESULTADO
 # ===============================
 def ws_resultado():
     def on_open(ws):
@@ -106,10 +105,16 @@ def ws_resultado():
 
         ws.close()
 
+    def on_close(ws, close_status_code=None, close_msg=None):
+        print("WS Resultado caiu, reconectando...")
+        time.sleep(5)
+        ws_resultado()
+
     ws = websocket.WebSocketApp(
         "wss://ws.derivws.com/websockets/v3?app_id=1089",
         on_open=on_open,
-        on_message=on_message
+        on_message=on_message,
+        on_close=on_close
     )
     ws.run_forever()
 
@@ -117,6 +122,8 @@ def ws_resultado():
 # WS ANALISE
 # ===============================
 def ws_analise():
+    global ULTIMO_STATUS
+
     def on_open(ws):
         ws.send(json.dumps({"authorize": DERIV_API_KEY}))
         for a in ATIVOS:
@@ -164,10 +171,20 @@ def ws_analise():
 
         threading.Thread(target=ws_resultado).start()
 
+    def on_error(ws, error):
+        print("WS Análise erro:", error)
+
+    def on_close(ws, close_status_code=None, close_msg=None):
+        print("WS Análise caiu, reconectando...")
+        time.sleep(5)
+        ws_analise()
+
     ws = websocket.WebSocketApp(
         "wss://ws.derivws.com/websockets/v3?app_id=1089",
         on_open=on_open,
-        on_message=on_message
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close
     )
     ws.run_forever()
 
