@@ -1,30 +1,22 @@
-# ======================================================
-# TROIA V20 - FASE 1 FINAL (RAILWAY SAFE)
-# ======================================================
-
-import websocket, json, time, sqlite3, threading, requests, os
+import websocket, json, time, requests, threading
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from collections import defaultdict
+from flask import Flask
 
 # ===============================
-# CONFIGURAÇÃO
+# CONFIG FIXA – TROIA v21 FASE 1
 # ===============================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
-APP_ID = 1089
-
-ATIVOS = [
-    "frxEURUSD", "frxGBPUSD", "frxUSDJPY",
-    "frxAUDUSD", "frxUSDCAD", "frxUSDCHF",
-    "frxNZDUSD", "frxEURGBP"
-]
-
-GRANULARITY = 300  # 5 minutos
-DB_NAME = "troia_v20.db"
-
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
-RECONNECT_DELAY = 3
+ATIVOS = [
+    "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD",
+    "frxUSDCAD","frxUSDCHF","frxNZDUSD","frxEURGBP"
+]
+
+TIMEFRAME = 300  # 5 minutos
+CANDLES_ANALISE = 100
 
 # ===============================
 # TELEGRAM
@@ -33,129 +25,120 @@ def tg(msg):
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": msg,
+                "parse_mode": "HTML"
+            },
             timeout=5
         )
     except:
         pass
 
 # ===============================
-# KEEP ALIVE HTTP (PORT DINÂMICA)
+# PEGAR CANDLES DERIV
 # ===============================
-def keep_alive():
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"Troia V20 - Online")
-
-        def log_message(self, format, *args):
-            return
-
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    server.serve_forever()
-
-# ===============================
-# DATABASE
-# ===============================
-conn = sqlite3.connect(DB_NAME, check_same_thread=False)
-cur = conn.cursor()
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS candles_5m (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ativo TEXT,
-    timestamp INTEGER,
-    open REAL,
-    high REAL,
-    low REAL,
-    close REAL,
-    volume REAL,
-    UNIQUE(ativo, timestamp)
-)
-""")
-conn.commit()
-
-# ===============================
-# SALVAR CANDLE
-# ===============================
-def salvar_candle(ativo, c):
-    try:
-        cur.execute("""
-            INSERT OR IGNORE INTO candles_5m
-            (ativo, timestamp, open, high, low, close, volume)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            ativo,
-            c["epoch"],
-            c["open"],
-            c["high"],
-            c["low"],
-            c["close"],
-            c.get("volume", 0)
-        ))
-        conn.commit()
-    except:
-        pass
-
-# ===============================
-# HEARTBEAT
-# ===============================
-def heartbeat():
-    while True:
-        time.sleep(1800)
-        cur.execute("SELECT COUNT(*) FROM candles_5m")
-        total = cur.fetchone()[0]
-        tg(f"🤖 Troia V20 Online\n📊 Candles 5M coletados: {total}")
-
-# ===============================
-# WEBSOCKET
-# ===============================
-def on_message(ws, message):
-    data = json.loads(message)
-    if "candles" in data:
-        ativo = data.get("echo_req", {}).get("ticks_history")
-        for c in data["candles"]:
-            salvar_candle(ativo, c)
-
-def on_open(ws):
-    ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-    for ativo in ATIVOS:
-        ws.send(json.dumps({
-            "ticks_history": ativo,
-            "style": "candles",
-            "granularity": GRANULARITY,
-            "count": 1,
-            "subscribe": 1
-        }))
-
-def on_error(ws, error):
-    tg(f"⚠️ WS erro: {error}")
-
-def on_close(ws, *_):
-    tg("🔴 WebSocket caiu, reconectando...")
-    time.sleep(RECONNECT_DELAY)
-    start_ws()
-
-def start_ws():
-    ws = websocket.WebSocketApp(
-        f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}",
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close
+def pegar_candles(ativo, count=CANDLES_ANALISE):
+    ws = websocket.create_connection(
+        "wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=10
     )
-    ws.run_forever(ping_interval=20, ping_timeout=10)
+    ws.send(json.dumps({"authorize": DERIV_API_KEY}))
+    ws.send(json.dumps({
+        "ticks_history": ativo,
+        "style": "candles",
+        "granularity": TIMEFRAME,
+        "count": count,
+        "end": "latest"
+    }))
+    data = json.loads(ws.recv())
+    ws.close()
+    return data.get("candles", [])
+
+# ===============================
+# ANÁLISES
+# ===============================
+def detectar_tendencia(candles):
+    h = [c["high"] for c in candles[-10:]]
+    l = [c["low"] for c in candles[-10:]]
+    if h[-1] > h[-2] and l[-1] > l[-2]:
+        return "ALTA"
+    if h[-1] < h[-2] and l[-1] < l[-2]:
+        return "BAIXA"
+    return "LATERAL"
+
+def detectar_zonas(candles):
+    zonas = defaultdict(int)
+    for c in candles:
+        nivel = round((c["high"] + c["low"]) / 2, 5)
+        zonas[nivel] += 1
+    return {k:v for k,v in zonas.items() if v >= 3}
+
+def padrao_candle(c):
+    corpo = abs(c["close"] - c["open"])
+    total = c["high"] - c["low"]
+    if total == 0:
+        return None
+    if corpo / total >= 0.6:
+        return "CANDLE FORTE"
+    return None
+
+# ===============================
+# ANALISAR ATIVO
+# ===============================
+def analisar_ativo(ativo):
+    candles = pegar_candles(ativo)
+    if len(candles) < 30:
+        return
+
+    tendencia = detectar_tendencia(candles)
+    zonas = detectar_zonas(candles)
+    padrao = padrao_candle(candles[-1])
+
+    if tendencia == "LATERAL" or not zonas or not padrao:
+        return
+
+    direcao = "CALL" if tendencia == "ALTA" else "PUT"
+    horario = datetime.now(timezone.utc).strftime("%H:%M UTC")
+
+    tg(
+        f"🚀 <b>TROIA v21 — FASE 1</b>\n"
+        f"📊 <b>Ativo:</b> {ativo}\n"
+        f"📈 <b>Tendência:</b> {tendencia}\n"
+        f"🧱 <b>Zonas fortes:</b> {len(zonas)}\n"
+        f"🔥 <b>Padrão:</b> {padrao}\n"
+        f"🎯 <b>Direção:</b> {direcao}\n"
+        f"⏱ <b>Entrada:</b> Agora / Próx. vela 5M\n"
+        f"🕒 <b>Horário:</b> {horario}"
+    )
+
+# ===============================
+# LOOP PRINCIPAL
+# ===============================
+def loop():
+    tg("🧠 TROIA v21 — FASE 1 (5M PRO) INICIADO")
+    while True:
+        for ativo in ATIVOS:
+            try:
+                analisar_ativo(ativo)
+                time.sleep(5)
+            except:
+                time.sleep(3)
+
+# ===============================
+# HTTP KEEP ALIVE (RAILWAY)
+# ===============================
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Troia v21 Fase 1 Online"
+
+def start():
+    threading.Thread(target=loop, daemon=True).start()
+    app.run(host="0.0.0.0", port=8080)
 
 # ===============================
 # START
 # ===============================
 if __name__ == "__main__":
-    tg("🚀 Troia V20 – Fase 1 FINAL iniciada\nColeta 5M ativa.")
-
-    threading.Thread(target=keep_alive, daemon=True).start()
-    threading.Thread(target=heartbeat, daemon=True).start()
-
-    start_ws()
+    start()
