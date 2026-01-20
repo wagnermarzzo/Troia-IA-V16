@@ -1,12 +1,18 @@
-import websocket, json, time, sqlite3, threading
+# ======================================================
+# TROIA V20 - FASE 1 FINAL
+# Coleta de Candles 5M + Infra Estável
+# ======================================================
+
+import websocket, json, time, sqlite3, threading, requests
 from datetime import datetime, timezone
-import requests
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ===============================
-# CONFIG
+# CONFIGURAÇÃO
 # ===============================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
 APP_ID = 1089
+
 ATIVOS = [
     "frxEURUSD", "frxGBPUSD", "frxUSDJPY",
     "frxAUDUSD", "frxUSDCAD", "frxUSDCHF",
@@ -18,6 +24,8 @@ DB_NAME = "troia_v20.db"
 
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
+
+RECONNECT_DELAY = 3
 
 # ===============================
 # TELEGRAM
@@ -31,6 +39,23 @@ def tg(msg):
         )
     except:
         pass
+
+# ===============================
+# KEEP ALIVE HTTP (Railway)
+# ===============================
+def keep_alive():
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Troia V20 - Online")
+
+        def log_message(self, format, *args):
+            return
+
+    server = HTTPServer(("0.0.0.0", 8080), Handler)
+    server.serve_forever()
 
 # ===============================
 # DATABASE
@@ -113,7 +138,7 @@ def on_error(ws, error):
 
 def on_close(ws, *_):
     tg("🔴 WebSocket caiu, reconectando...")
-    time.sleep(3)
+    time.sleep(RECONNECT_DELAY)
     start_ws()
 
 def start_ws():
@@ -124,12 +149,15 @@ def start_ws():
         on_error=on_error,
         on_close=on_close
     )
-    ws.run_forever(ping_interval=30, ping_timeout=10)
+    ws.run_forever(ping_interval=20, ping_timeout=10)
 
 # ===============================
 # START
 # ===============================
 if __name__ == "__main__":
-    tg("🚀 Troia V20 – Fase 1 iniciada\nColeta 5M ativa.")
+    tg("🚀 Troia V20 – Fase 1 FINAL iniciada\nColeta 5M ativa.")
+
+    threading.Thread(target=keep_alive, daemon=True).start()
     threading.Thread(target=heartbeat, daemon=True).start()
+
     start_ws()
