@@ -1,24 +1,23 @@
-import websocket, json, time, requests
-from datetime import datetime, timezone, timedelta
+import websocket, json, time, sqlite3, threading
+from datetime import datetime, timezone
+import requests
 
 # ===============================
-# CONFIGURAÇÃO
+# CONFIG
 # ===============================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
-TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
-TELEGRAM_CHAT_ID = "-1003656750711"
-
+APP_ID = 1089
 ATIVOS = [
-    "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD",
-    "frxUSDCAD", "frxUSDCHF", "frxNZDUSD", "frxEURGBP"
+    "frxEURUSD", "frxGBPUSD", "frxUSDJPY",
+    "frxAUDUSD", "frxUSDCAD", "frxUSDCHF",
+    "frxNZDUSD", "frxEURGBP"
 ]
 
-NUM_CANDLES_ANALISE = 20
-TIMEFRAME = 60  # 1M
-CONF_MIN = 55
-WAIT_AFTER_VELA = 65  # espera 1m05s
-ESTRATEGIA = "Análise últimos 20 candles 1M"
-RECONNECT_DELAY = 3  # segundos caso WS caia
+GRANULARITY = 300  # 5 minutos
+DB_NAME = "troia_v20.db"
+
+TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
+TELEGRAM_CHAT_ID = "-1003656750711"
 
 # ===============================
 # TELEGRAM
@@ -27,111 +26,110 @@ def tg(msg):
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode":"HTML"}, timeout=5
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            timeout=5
         )
-    except: pass
+    except:
+        pass
 
 # ===============================
-# DIREÇÃO E CONFIANÇA
+# DATABASE
 # ===============================
-def direcao_candle(candle):
-    return "CALL" if candle["close"] > candle["open"] else "PUT"
+conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+cur = conn.cursor()
 
-def calcular_confianca(candles):
-    call = sum(1 for c in candles if c["close"] > c["open"])
-    put = sum(1 for c in candles if c["close"] < c["open"])
-    total = len(candles)
-    maior = max(call, put)
-    return int(maior/total*100)
+cur.execute("""
+CREATE TABLE IF NOT EXISTS candles_5m (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ativo TEXT,
+    timestamp INTEGER,
+    open REAL,
+    high REAL,
+    low REAL,
+    close REAL,
+    volume REAL,
+    UNIQUE(ativo, timestamp)
+)
+""")
+conn.commit()
 
 # ===============================
-# PRÓXIMA VELA
+# SALVAR CANDLE
 # ===============================
-def proxima_vela_horario():
-    now = datetime.now(timezone.utc)
-    next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
-    return next_minute.strftime("%H:%M:%S UTC")
+def salvar_candle(ativo, c):
+    try:
+        cur.execute("""
+            INSERT OR IGNORE INTO candles_5m
+            (ativo, timestamp, open, high, low, close, volume)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            ativo,
+            c["epoch"],
+            c["open"],
+            c["high"],
+            c["low"],
+            c["close"],
+            c.get("volume", 0)
+        ))
+        conn.commit()
+    except:
+        pass
 
 # ===============================
-# FUNÇÃO PARA PEGAR CANDLES
+# HEARTBEAT
 # ===============================
-def pegar_candles(ativo, count=NUM_CANDLES_ANALISE):
+def heartbeat():
     while True:
-        try:
-            ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=10)
-            ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-            end_timestamp = int(time.time())
-            ws.send(json.dumps({
-                "ticks_history": ativo,
-                "style": "candles",
-                "granularity": TIMEFRAME,
-                "count": count,
-                "end": end_timestamp
-            }))
-            data = json.loads(ws.recv())
-            ws.close()
-            if "candles" in data:
-                return data["candles"][-count:]
-        except:
-            time.sleep(RECONNECT_DELAY)  # reconectar se falhar
+        time.sleep(1800)
+        cur.execute("SELECT COUNT(*) FROM candles_5m")
+        total = cur.fetchone()[0]
+        tg(f"🤖 Troia V20 Online\n📊 Candles 5M coletados: {total}")
 
 # ===============================
-# ANALISA 1 ATIVO
+# WEBSOCKET
 # ===============================
-def analisar_ativo(ativo):
-    candles = pegar_candles(ativo)
-    direcao = direcao_candle(candles[-1])
-    conf = calcular_confianca(candles)
-    horario_entrada = proxima_vela_horario()
+def on_message(ws, message):
+    data = json.loads(message)
 
-    if conf >= CONF_MIN:
-        tg(f"💥 <b>SINAL ENCONTRADO!</b>\n"
-           f"📊 <b>Ativo:</b> {ativo}\n"
-           f"🎯 <b>Direção:</b> {direcao}\n"
-           f"⏱️ <b>Timeframe:</b> 1M\n"
-           f"🧠 <b>Estratégia:</b> {ESTRATEGIA}\n"
-           f"🚀 <b>Entrada:</b> {horario_entrada}\n"
-           f"📈 <b>Confiança:</b> {conf}%")
-        return {"ativo": ativo, "direcao": direcao, "horario_entrada": horario_entrada}
-    return None
+    if "candles" in data:
+        ativo = data.get("echo_req", {}).get("ticks_history")
+        for c in data["candles"]:
+            salvar_candle(ativo, c)
 
-# ===============================
-# RESULTADO REAL
-# ===============================
-def resultado_real(ativo, direcao):
-    candles = pegar_candles(ativo, count=1)
-    candle = candles[-1]
-    direcao_real = direcao_candle(candle)
-    if direcao_real == direcao:
-        return "💸 Green"
-    else:
-        return "🧨 Red"
+def on_open(ws):
+    ws.send(json.dumps({"authorize": DERIV_API_KEY}))
 
-# ===============================
-# LOOP PRINCIPAL
-# ===============================
-def loop_ativos():
-    tg("🤖 Troia V19 PRO FINAL - Painel Profissional iniciado.\nAnalise 1 ativo por vez.")
-    while True:
-        for ativo in ATIVOS:
-            try:
-                res = analisar_ativo(ativo)
-                if res:
-                    time.sleep(WAIT_AFTER_VELA)  # espera fechamento vela
-                    resultado = resultado_real(res["ativo"], res["direcao"])
-                    tg(f"🧾 <b>RESULTADO SINAL</b>\n"
-                       f"📊 <b>Ativo:</b> {res['ativo']}\n"
-                       f"🎯 <b>Direção:</b> {res['direcao']}\n"
-                       f"⏱️ <b>Entrada realizada:</b> {res['horario_entrada']}\n"
-                       f"✅ <b>Resultado:</b> {resultado}")
-                else:
-                    time.sleep(2)
-            except Exception as e:
-                tg(f"❌ Erro no ativo {ativo}: {e}")
-                time.sleep(RECONNECT_DELAY)
+    for ativo in ATIVOS:
+        ws.send(json.dumps({
+            "ticks_history": ativo,
+            "style": "candles",
+            "granularity": GRANULARITY,
+            "count": 1,
+            "subscribe": 1
+        }))
+
+def on_error(ws, error):
+    tg(f"⚠️ WS erro: {error}")
+
+def on_close(ws, *_):
+    tg("🔴 WebSocket caiu, reconectando...")
+    time.sleep(3)
+    start_ws()
+
+def start_ws():
+    ws = websocket.WebSocketApp(
+        f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}",
+        on_open=on_open,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close
+    )
+    ws.run_forever(ping_interval=30, ping_timeout=10)
 
 # ===============================
 # START
 # ===============================
 if __name__ == "__main__":
-    loop_ativos()
+    tg("🚀 Troia V20 – Fase 1 iniciada\nColeta 5M ativa.")
+    threading.Thread(target=heartbeat, daemon=True).start()
+    start_ws()
