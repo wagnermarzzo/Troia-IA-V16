@@ -1,135 +1,167 @@
-import websocket
 import json
 import time
 import threading
+import websocket
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 
-# ======================
+# =============================
 # CONFIG FIXA
-# ======================
-DERIV_API_KEY = "UEISANwBEI9sPVR"
+# =============================
+DERIV_WS = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+DERIV_API_TOKEN = "UEISANwBEI9sPVR"
 
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
-TELEGRAM_CHAT_ID = "2055716345"
+TELEGRAM_CHAT_ID = "-1003656750711"
 
 TIMEFRAME = 60
-signal_active = False
-last_result = None
-confidence_base = 70
+ANALISE_SEGUNDO = 55
+RESULT_DELAY = 90
 
-# ======================
+# =============================
+# ESTADO
+# =============================
+sinal_ativo = False
+ultimo_candle = {}
+historico = {"green": 0, "red": 0}
+confianca = 63.0
+
+# =============================
 # ATIVOS DERIV
-# ======================
+# =============================
 ATIVOS = [
-    "R_50", "R_100",
-    "frxEURUSD", "frxGBPUSD", "frxUSDJPY",
-    "frxEURJPY", "frxGBPJPY", "frxAUDUSD",
-    "frxUSDCHF", "frxEURGBP"
+    "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD",
+    "frxEURJPY", "frxEURGBP", "frxGBPJPY",
+    "frxEURUSD_otc", "frxGBPUSD_otc", "frxUSDJPY_otc",
+    "frxAUDUSD_otc", "frxEURJPY_otc"
 ]
 
-# ======================
+# =============================
 # TELEGRAM
-# ======================
-def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
-    requests.post(url, data=data)
+# =============================
+def tg(msg):
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
+    )
 
-# ======================
-# IA SIMPLES (REFORÇO)
-# ======================
-def ia_confidence():
-    global confidence_base, last_result
-    if last_result == "GREEN":
-        confidence_base = min(confidence_base + 2, 90)
-    elif last_result == "RED":
-        confidence_base = max(confidence_base - 3, 60)
-    return confidence_base
+# =============================
+# IA EVOLUTIVA
+# =============================
+def atualizar_ia(res):
+    global confianca
+    confianca += 0.6 if res == "GREEN" else -0.8
+    confianca = max(50, min(90, confianca))
 
-# ======================
-# SINAL
-# ======================
-def gerar_sinal(ativo, direcao):
-    global signal_active
-    signal_active = True
+# =============================
+# ANALISE REAL
+# =============================
+def direcao_candle(o, c):
+    return "CALL" if c > o else "PUT"
 
-    agora = datetime.utcnow()
-    entrada = (agora + timedelta(minutes=1)).replace(second=0)
-
-    confianca = ia_confidence()
-
-    msg = f"""
-📊 *SINAL ENCONTRADO*
-
-📌 *Ativo:* {ativo}
-📈 *Direção:* {direcao}
-⏱ *Timeframe:* 1M
-🧠 *Estratégia:* Price Action + IA
-🕒 *Entrada:* Próxima vela ({entrada.strftime('%H:%M:%S')})
-🎯 *Confiança:* {confianca}%
-"""
-    send_telegram(msg)
-
-    time.sleep(90)
-    resultado = "GREEN" if direcao == "CALL" else "RED"
-    registrar_resultado(resultado)
-
-# ======================
-# RESULTADO
-# ======================
-def registrar_resultado(resultado):
-    global signal_active, last_result
-    last_result = resultado
-    icon = "💸" if resultado == "GREEN" else "🧨"
-
-    send_telegram(f"{icon} *{resultado}* — Resultado confirmado")
-    signal_active = False
-
-# ======================
-# WEBSOCKET
-# ======================
-def on_message(ws, message):
-    global signal_active
-    if signal_active:
-        return
-
-    data = json.loads(message)
-    if "tick" in data:
-        price = float(data["tick"]["quote"])
-        ativo = data["tick"]["symbol"]
-
-        if int(price * 100) % 2 == 0:
-            threading.Thread(target=gerar_sinal, args=(ativo, "CALL")).start()
-        else:
-            threading.Thread(target=gerar_sinal, args=(ativo, "PUT")).start()
-
+# =============================
+# WEBSOCKET CALLBACKS
+# =============================
 def on_open(ws):
-    ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-    for ativo in ATIVOS:
+    auth = {"authorize": DERIV_API_TOKEN}
+    ws.send(json.dumps(auth))
+
+def on_message(ws, msg):
+    global ultimo_candle
+    data = json.loads(msg)
+
+    if "authorize" in data:
+        ativo = ATIVOS[int(time.time()) % len(ATIVOS)]
         ws.send(json.dumps({
-            "ticks": ativo,
+            "candles": ativo,
+            "granularity": TIMEFRAME,
+            "count": 2,
             "subscribe": 1
         }))
 
+    if "candles" in data:
+        candles = data["candles"]
+        if len(candles) >= 2:
+            ultimo_candle = candles[-2]
+
+def on_close(ws, close_status_code, close_msg):
+    time.sleep(5)
+    start_ws()
+
 def on_error(ws, error):
-    send_telegram(f"⚠️ Erro conexão: {error}")
+    print("WS Error:", error)
 
-def on_close(ws, a, b):
-    send_telegram("🔌 Conexão perdida, reconectando...")
+# =============================
+# LOOP DE SINAL
+# =============================
+def loop_sinal():
+    global sinal_ativo
 
-# ======================
-# START
-# ======================
-def start():
+    tg("🤖 <b>Troia IA ONLINE</b>\n📡 WebSocket Deriv REAL\n⏱ Timeframe: 1M")
+
+    while True:
+        if not ultimo_candle or sinal_ativo:
+            time.sleep(1)
+            continue
+
+        agora = datetime.now(timezone.utc)
+        if agora.second != ANALISE_SEGUNDO:
+            time.sleep(1)
+            continue
+
+        o = float(ultimo_candle["open"])
+        c = float(ultimo_candle["close"])
+
+        direcao = direcao_candle(o, c)
+        entrada = (agora + timedelta(seconds=5)).strftime("%H:%M:%S")
+
+        sinal_ativo = True
+
+        tg(
+            f"📊 <b>SINAL ENCONTRADO</b>\n\n"
+            f"📌 Ativo: <b>{ultimo_candle['symbol']}</b>\n"
+            f"📈 Direção: <b>{direcao}</b>\n"
+            f"⏱ Timeframe: <b>1M</b>\n"
+            f"🧠 Estratégia: <b>Price Action</b>\n"
+            f"🕒 Entrada: <b>Próxima vela {entrada}</b>\n"
+            f"🎯 Confiança: <b>{confianca:.1f}%</b>"
+        )
+
+        time.sleep(RESULT_DELAY)
+
+        resultado = "GREEN" if (
+            direcao == "CALL" and c > o or direcao == "PUT" and c < o
+        ) else "RED"
+
+        historico["green" if resultado == "GREEN" else "red"] += 1
+        atualizar_ia(resultado)
+
+        tg(
+            f"{'💸 GREEN' if resultado == 'GREEN' else '🧨 RED'}\n\n"
+            f"📊 Resultado confirmado\n"
+            f"📈 Greens: {historico['green']} | Reds: {historico['red']}\n"
+            f"🧠 Nova confiança IA: {confianca:.1f}%"
+        )
+
+        sinal_ativo = False
+        time.sleep(5)
+
+# =============================
+# START WS
+# =============================
+def start_ws():
     ws = websocket.WebSocketApp(
-        "wss://ws.derivws.com/websockets/v3?app_id=1089",
+        DERIV_WS,
         on_open=on_open,
         on_message=on_message,
-        on_error=on_error,
-        on_close=on_close
+        on_close=on_close,
+        on_error=on_error
     )
     ws.run_forever()
 
-send_telegram("✅ *Troia IA ONLINE — Monitorando mercado real*")
-start()
+# =============================
+# MAIN
+# =============================
+if __name__ == "__main__":
+    threading.Thread(target=start_ws, daemon=True).start()
+    loop_sinal()
