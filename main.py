@@ -1,46 +1,137 @@
+import websocket, json, time, requests
+from datetime import datetime, timezone, timedelta
+
 # ===============================
-# LOOP PRINCIPAL COM RESULTADO REAL
+# CONFIGURAÇÃO
+# ===============================
+DERIV_API_KEY = "UEISANwBEI9sPVR"
+TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
+TELEGRAM_CHAT_ID = "-1003656750711"
+
+ATIVOS = [
+    "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD",
+    "frxUSDCAD", "frxUSDCHF", "frxNZDUSD", "frxEURGBP"
+]
+
+NUM_CANDLES_ANALISE = 20
+TIMEFRAME = 60  # 1M
+CONF_MIN = 55
+WAIT_AFTER_VELA = 65  # espera 1m05s
+ESTRATEGIA = "Análise últimos 20 candles 1M"
+RECONNECT_DELAY = 3  # segundos caso WS caia
+
+# ===============================
+# TELEGRAM
+# ===============================
+def tg(msg):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode":"HTML"}, timeout=5
+        )
+    except: pass
+
+# ===============================
+# DIREÇÃO E CONFIANÇA
+# ===============================
+def direcao_candle(candle):
+    return "CALL" if candle["close"] > candle["open"] else "PUT"
+
+def calcular_confianca(candles):
+    call = sum(1 for c in candles if c["close"] > c["open"])
+    put = sum(1 for c in candles if c["close"] < c["open"])
+    total = len(candles)
+    maior = max(call, put)
+    return int(maior/total*100)
+
+# ===============================
+# PRÓXIMA VELA
+# ===============================
+def proxima_vela_horario():
+    now = datetime.now(timezone.utc)
+    next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    return next_minute.strftime("%H:%M:%S UTC")
+
+# ===============================
+# FUNÇÃO PARA PEGAR CANDLES
+# ===============================
+def pegar_candles(ativo, count=NUM_CANDLES_ANALISE):
+    while True:
+        try:
+            ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=10)
+            ws.send(json.dumps({"authorize": DERIV_API_KEY}))
+            end_timestamp = int(time.time())
+            ws.send(json.dumps({
+                "ticks_history": ativo,
+                "style": "candles",
+                "granularity": TIMEFRAME,
+                "count": count,
+                "end": end_timestamp
+            }))
+            data = json.loads(ws.recv())
+            ws.close()
+            if "candles" in data:
+                return data["candles"][-count:]
+        except:
+            time.sleep(RECONNECT_DELAY)  # reconectar se falhar
+
+# ===============================
+# ANALISA 1 ATIVO
+# ===============================
+def analisar_ativo(ativo):
+    candles = pegar_candles(ativo)
+    direcao = direcao_candle(candles[-1])
+    conf = calcular_confianca(candles)
+    horario_entrada = proxima_vela_horario()
+
+    if conf >= CONF_MIN:
+        tg(f"💥 <b>SINAL ENCONTRADO!</b>\n"
+           f"📊 <b>Ativo:</b> {ativo}\n"
+           f"🎯 <b>Direção:</b> {direcao}\n"
+           f"⏱️ <b>Timeframe:</b> 1M\n"
+           f"🧠 <b>Estratégia:</b> {ESTRATEGIA}\n"
+           f"🚀 <b>Entrada:</b> {horario_entrada}\n"
+           f"📈 <b>Confiança:</b> {conf}%")
+        return {"ativo": ativo, "direcao": direcao, "horario_entrada": horario_entrada}
+    return None
+
+# ===============================
+# RESULTADO REAL
+# ===============================
+def resultado_real(ativo, direcao):
+    candles = pegar_candles(ativo, count=1)
+    candle = candles[-1]
+    direcao_real = direcao_candle(candle)
+    if direcao_real == direcao:
+        return "💸 Green"
+    else:
+        return "🧨 Red"
+
+# ===============================
+# LOOP PRINCIPAL
 # ===============================
 def loop_ativos():
     tg("🤖 Troia V19 PRO FINAL - Painel Profissional iniciado.\nAnalise 1 ativo por vez.")
     while True:
         for ativo in ATIVOS:
-            res = analisar_ativo(ativo)
-            if res.get("sinal_enviado"):
-                # Espera 1 vela fechar antes de verificar resultado
-                time.sleep(WAIT_AFTER_VELA)
-
-                # Pegar candle real da entrada
-                end_timestamp = int(time.time())
-                # Conecta WS para pegar último candle
-                try:
-                    ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089")
-                    ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-                    ws.send(json.dumps({
-                        "ticks_history": ativo,
-                        "style": "candles",
-                        "granularity": TIMEFRAME,
-                        "count": 1,
-                        "end": end_timestamp
-                    }))
-                    data = json.loads(ws.recv())
-                    candle = data["candles"][-1]
-                    ws.close()
-
-                    # Determinar resultado real
-                    direcao_real = direcao_candle(candle)
-                    if direcao_real == res['direcao']:
-                        resultado = "💸 Green"
-                    else:
-                        resultado = "🧨 Red"
-
+            try:
+                res = analisar_ativo(ativo)
+                if res:
+                    time.sleep(WAIT_AFTER_VELA)  # espera fechamento vela
+                    resultado = resultado_real(res["ativo"], res["direcao"])
                     tg(f"🧾 <b>RESULTADO SINAL</b>\n"
-                       f"📊 <b>Ativo:</b> {ativo}\n"
+                       f"📊 <b>Ativo:</b> {res['ativo']}\n"
                        f"🎯 <b>Direção:</b> {res['direcao']}\n"
                        f"⏱️ <b>Entrada realizada:</b> {res['horario_entrada']}\n"
                        f"✅ <b>Resultado:</b> {resultado}")
-                except:
-                    tg(f"❌ Não foi possível obter candle real de {ativo}")
-            else:
-                # Nenhum sinal → passa para próximo ativo
-                time.sleep(2)
+                else:
+                    time.sleep(2)
+            except Exception as e:
+                tg(f"❌ Erro no ativo {ativo}: {e}")
+                time.sleep(RECONNECT_DELAY)
+
+# ===============================
+# START
+# ===============================
+if __name__ == "__main__":
+    loop_ativos()
