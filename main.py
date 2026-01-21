@@ -11,7 +11,7 @@ TELEGRAM_CHAT_ID = "-1003656750711"
 
 TIMEFRAME = 300  # 5 minutos
 CONF_MIN = 55
-WAIT_BUFFER = 10  # segundos extras para garantir fechamento da vela
+WAIT_BUFFER = 10  # segundos extras
 RECONNECT_DELAY = 3
 
 LOG_FILE = "sinais_log.csv"
@@ -154,58 +154,53 @@ def resultado_real(res):
             sinal_em_analise.release()
 
 # ===============================
-# ANALISA 1 ATIVO POR VEZ
-# ===============================
-def analisar_ativo(ativo):
-    candles = pegar_candles(ativo)
-    if not candles:
-        return None
-
-    direcao = direcao_candle(candles[-1])
-    confianca = calcular_confianca(candles)
-    horario_entrada = proxima_vela_horario()
-
-    motivo = "Price Action + Suportes/Resistências"
-    if ativo in ATIVOS_OTC:
-        motivo += " ⚠ OTC: baixa liquidez"
-
-    if confianca >= CONF_MIN and not sinal_em_analise.locked():
-        sinal_em_analise.acquire()
-        enviar_sinal(
-            ativo,
-            direcao,
-            confianca,
-            "Price Action + Suportes/Resistências",
-            entrada=f"Agora ({horario_entrada})",
-            motivo=motivo
-        )
-        log_sinal(ativo, direcao, confianca, None)
-
-        threading.Thread(target=resultado_real, args=({
-            "ativo": ativo,
-            "direcao": direcao,
-            "horario_entrada": horario_entrada,
-            "tempo_espera": TIMEFRAME + WAIT_BUFFER,
-            "confianca": confianca
-        },)).start()
-        return True
-    return None
-
-# ===============================
 # LOOP PRINCIPAL OTIMIZADO
 # ===============================
 def loop_ativos():
     enviar_sinal("N/A", "N/A", 0, "Iniciando Bot Sentinel IA – Painel Profissional")
+    cooldowns = {ativo: 0 for ativo in ATIVOS}  # timestamp de último sinal por ativo
+
     while True:
-        sinal_enviado = False
+        now_ts = time.time()
         for ativo in ATIVOS:
-            if not sinal_em_analise.locked():
-                enviado = analisar_ativo(ativo)
-                if enviado:
-                    sinal_enviado = True
-                    break  # só 1 sinal por vez
-        # pausa curta para não sobrecarregar CPU
-        time.sleep(0.1 if not sinal_enviado else 1)
+            if now_ts < cooldowns[ativo]:
+                continue  # ainda no cooldown
+
+            candles = pegar_candles(ativo)
+            if not candles:
+                continue
+
+            direcao = direcao_candle(candles[-1])
+            confianca = calcular_confianca(candles)
+
+            if confianca >= CONF_MIN:
+                if sinal_em_analise.acquire(blocking=False):
+                    horario_entrada = proxima_vela_horario()
+                    motivo = "Price Action + Suportes/Resistências"
+                    if ativo in ATIVOS_OTC:
+                        motivo += " ⚠ OTC: baixa liquidez"
+
+                    enviar_sinal(
+                        ativo,
+                        direcao,
+                        confianca,
+                        "Price Action + Suportes/Resistências",
+                        entrada=f"Agora ({horario_entrada})",
+                        motivo=motivo
+                    )
+                    log_sinal(ativo, direcao, confianca, None)
+
+                    threading.Thread(target=resultado_real, args=({
+                        "ativo": ativo,
+                        "direcao": direcao,
+                        "horario_entrada": horario_entrada,
+                        "tempo_espera": TIMEFRAME + WAIT_BUFFER,
+                        "confianca": confianca
+                    },)).start()
+
+                    cooldowns[ativo] = now_ts + TIMEFRAME  # evita re-sinal rápido
+
+        time.sleep(0.1)  # pausa curta para CPU
 
 # ===============================
 # START
