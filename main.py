@@ -1,4 +1,4 @@
-import websocket, json, time, requests, csv, os
+import json, time, requests, csv, os
 from datetime import datetime, timezone, timedelta
 import threading
 
@@ -11,41 +11,42 @@ TELEGRAM_CHAT_ID = "-1003656750711"
 
 TIMEFRAME = 300  # 5 minutos
 CONF_MIN = 55
-PROB_MIN = 70  # probabilidade mínima real para envio de sinal
-WAIT_BUFFER = 10  # segundos extras
+PROB_MIN = 70
+WAIT_BUFFER = 10
 RECONNECT_DELAY = 5
 LOG_FILE = "sinais_log.csv"
 ERROR_LOG = "error_log.txt"
+
 sinal_em_analise = threading.Lock()
 
 # ===============================
-# ATIVOS (FOREX + OTC)
+# ATIVOS
 # ===============================
 ATIVOS_FOREX = [
-    "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD",
-    "frxUSDCAD", "frxUSDCHF", "frxNZDUSD", "frxEURGBP",
-    "frxEURJPY", "frxEURCHF", "frxEURAUD", "frxEURCAD",
-    "frxEURNZD", "frxGBPJPY", "frxGBPCHF", "frxGBPAUD",
-    "frxGBPCAD", "frxGBPNZD", "frxAUDJPY", "frxAUDNZD",
-    "frxAUDCAD", "frxAUDCHF", "frxCADJPY", "frxCADCHF",
-    "frxCHFJPY", "frxNZDJPY", "frxNZDCAD", "frxNZDCHF"
+    "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD",
+    "frxUSDCAD","frxUSDCHF","frxNZDUSD","frxEURGBP",
+    "frxEURJPY","frxEURCHF","frxEURAUD","frxEURCAD",
+    "frxEURNZD","frxGBPJPY","frxGBPCHF","frxGBPAUD",
+    "frxGBPCAD","frxGBPNZD","frxAUDJPY","frxAUDNZD",
+    "frxAUDCAD","frxAUDCHF","frxCADJPY","frxCADCHF",
+    "frxCHFJPY","frxNZDJPY","frxNZDCAD","frxNZDCHF"
 ]
 
 ATIVOS_OTC = [
-    "frxUSDTRY", "frxUSDRUB", "frxUSDZAR", "frxUSDMXN",
-    "frxUSDHKD", "frxUSDKRW", "frxUSDSEK", "frxUSDNOK",
-    "frxUSDDKK", "frxUSDPLN", "frxUSDHUF"
+    "frxUSDTRY","frxUSDRUB","frxUSDZAR","frxUSDMXN",
+    "frxUSDHKD","frxUSDKRW","frxUSDSEK","frxUSDNOK",
+    "frxUSDDKK","frxUSDPLN","frxUSDHUF"
 ]
 
 ATIVOS = ATIVOS_FOREX + ATIVOS_OTC
 
 # ===============================
-# FUNÇÃO DE LOG DE ERROS
+# LOG DE ERROS
 # ===============================
-def log_error(mensagem):
+def log_error(msg):
     with open(ERROR_LOG, "a") as f:
-        f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {mensagem}\n")
-    print(mensagem)
+        f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {msg}\n")
+    print(msg)
 
 # ===============================
 # TELEGRAM
@@ -54,18 +55,15 @@ def enviar_sinal(ativo, direcao, confianca, estrategia, entrada="Próxima vela",
     try:
         now = datetime.now(timezone.utc).strftime("%H:%M UTC")
         nome_bot = "SENTINEL IA – SINAL ENCONTRADO"
-
         msg = f"💥 <b>{nome_bot}</b>\n" \
               f"📊 <b>Ativo:</b> {ativo}\n" \
               f"🎯 <b>Direção:</b> {direcao}\n" \
               f"🧠 <b>Estratégia:</b> {estrategia}\n" \
               f"⏱️ <b>Entrada:</b> {entrada}\n" \
               f"🧮 <b>Confiança:</b> {confianca}%\n"
-
         if resultado:
-            cor = "🟢 Green" if resultado == "Green" else "🔴 Red"
+            cor = "🟢 Green" if resultado=="Green" else "🔴 Red"
             msg += f"✅ <b>Resultado:</b> {cor}"
-
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
@@ -82,45 +80,30 @@ def direcao_candle(candle):
 
 def calcular_confianca(candles):
     call = sum(1 for c in candles if c["close"] > c["open"])
-    put = sum(1 for c in candles if c["close"] < c["open"])
+    put  = sum(1 for c in candles if c["close"] < c["open"])
     total = len(candles)
-    if total == 0:
-        return 0
-    return int(max(call, put) / total * 100)
+    return int(max(call, put)/total*100) if total else 0
 
 def direcao_confirmada(candles, n=3):
     ultimos = candles[-n:]
     calls = sum(1 for c in ultimos if c["close"] > c["open"])
-    puts = sum(1 for c in ultimos if c["close"] < c["open"])
-    if calls == n:
-        return "CALL"
-    elif puts == n:
-        return "PUT"
-    else:
-        return None
+    puts  = sum(1 for c in ultimos if c["close"] < c["open"])
+    if calls==n: return "CALL"
+    if puts==n:  return "PUT"
+    return None
 
 def tendencia_medio_prazo(candles, periodo=20):
-    if len(candles) < periodo:
-        periodo = len(candles)
-    fechamento_inicio = candles[-periodo]["close"]
-    fechamento_fim = candles[-1]["close"]
-    return "CALL" if fechamento_fim > fechamento_inicio else "PUT"
+    if len(candles)<periodo: periodo=len(candles)
+    return "CALL" if candles[-1]["close"] > candles[-periodo]["close"] else "PUT"
 
 def candle_valido(candle, min_pct=0.0003):
-    diff = abs(candle["close"] - candle["open"])
-    return diff / candle["open"] >= min_pct
-
-def suporte_resistencia(candles, periodo=50):
-    highs = [c["high"] for c in candles[-periodo:]]
-    lows = [c["low"] for c in candles[-periodo:]]
-    return min(lows), max(highs)
+    return abs(candle["close"]-candle["open"])/candle["open"] >= min_pct
 
 def probabilidade_real(candles, direcao):
     total = len(candles)
-    if total == 0:
-        return 0
-    verdes = sum(1 for c in candles if direcao_candle(c) == direcao)
-    return int(verdes / total * 100)
+    if total==0: return 0
+    verdes = sum(1 for c in candles if direcao_candle(c)==direcao)
+    return int(verdes/total*100)
 
 def proxima_vela_horario():
     now = datetime.now(timezone.utc)
@@ -128,31 +111,27 @@ def proxima_vela_horario():
     return next_time.strftime("%H:%M:%S UTC")
 
 # ===============================
-# PEGAR CANDLES COM RETRY
+# PEGAR CANDLES HTTP COM RETRY
 # ===============================
-def pegar_candles(ativo, count=50):
-    while True:
+def pegar_candles_http(ativo, count=50, max_retry=3):
+    url = f"https://api.deriv.com/api/v1/ticks_history?symbol={ativo}&count={count}&granularity={TIMEFRAME}&style=candles"
+    retries = 0
+    while retries < max_retry:
         try:
-            ws = websocket.create_connection(
-                "wss://ws.derivws.com/websockets/v3?app_id=1089",
-                timeout=10
-            )
-            ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-            end_timestamp = int(time.time())
-            ws.send(json.dumps({
-                "ticks_history": ativo,
-                "style": "candles",
-                "granularity": TIMEFRAME,
-                "count": count,
-                "end": end_timestamp
-            }))
-            data = json.loads(ws.recv())
-            ws.close()
-            if "candles" in data:
+            r = requests.get(url, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            if "candles" in data: 
                 return data["candles"][-count:]
-        except Exception as e:
-            log_error(f"Falha ao pegar candles de {ativo}, retry em {RECONNECT_DELAY}s: {e}")
-            time.sleep(RECONNECT_DELAY)
+            else:
+                log_error(f"{ativo} retornou dados inválidos: {data}")
+                return None
+        except requests.exceptions.RequestException as e:
+            retries += 1
+            log_error(f"Falha ao pegar candles {ativo}, tentativa {retries}/{max_retry}: {e}")
+            time.sleep(RECONNECT_DELAY*retries)
+    log_error(f"{ativo} pulado após {max_retry} tentativas")
+    return None
 
 # ===============================
 # LOG DE SINAIS
@@ -162,8 +141,8 @@ def log_sinal(ativo, direcao, confianca, resultado):
     with open(LOG_FILE, "a", newline="") as f:
         writer = csv.writer(f)
         if not exists:
-            writer.writerow(["Data", "Ativo", "Direcao", "Confianca", "Resultado"])
-        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ativo, direcao, confianca, resultado or "Em análise"])
+            writer.writerow(["Data","Ativo","Direcao","Confianca","Resultado"])
+        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"),ativo,direcao,confianca,resultado or "Em análise"])
 
 # ===============================
 # RESULTADO REAL
@@ -171,17 +150,15 @@ def log_sinal(ativo, direcao, confianca, resultado):
 def resultado_real(res):
     try:
         time.sleep(res["tempo_espera"])
-        candles = pegar_candles(res["ativo"], count=1)
+        candles = pegar_candles_http(res["ativo"], count=1)
         if not candles:
             resultado = "Erro"
         else:
             direcao_real = direcao_candle(candles[-1])
-            resultado = "Green" if direcao_real == res["direcao"] else "Red"
+            resultado = "Green" if direcao_real==res["direcao"] else "Red"
 
         enviar_sinal(
-            res["ativo"],
-            res["direcao"],
-            res["confianca"],
+            res["ativo"], res["direcao"], res["confianca"],
             "Price Action + Suportes/Resistências + Probabilidade Avançada",
             entrada=f"{res['horario_entrada']} (concluído)",
             resultado=resultado
@@ -195,9 +172,9 @@ def resultado_real(res):
 # LOOP PRINCIPAL FINAL
 # ===============================
 def loop_ativos_final():
-    enviar_sinal("N/A", "N/A", 0, "Iniciando Bot Sentinel IA – Painel Profissional")
-    cooldowns = {ativo: 0 for ativo in ATIVOS}
-    ultimo_sinal = {ativo: None for ativo in ATIVOS}
+    enviar_sinal("N/A","N/A",0,"Iniciando Bot Sentinel IA – Painel Profissional")
+    cooldowns = {ativo:0 for ativo in ATIVOS}
+    ultimo_sinal = {ativo:None for ativo in ATIVOS}
 
     while True:
         now_ts = time.time()
@@ -205,7 +182,7 @@ def loop_ativos_final():
             if now_ts < cooldowns[ativo]:
                 continue
 
-            candles = pegar_candles(ativo, count=50)
+            candles = pegar_candles_http(ativo, count=50)
             if not candles:
                 continue
 
@@ -221,13 +198,11 @@ def loop_ativos_final():
             if direcao != tendencia:
                 continue
 
-            min_conf = CONF_MIN
-            if ativo in ATIVOS_OTC:
-                min_conf += 15
+            min_conf = CONF_MIN + (15 if ativo in ATIVOS_OTC else 0)
             if confianca < min_conf:
                 continue
 
-            prob_real = probabilidade_real(candles, direcao)
+            prob_real = probabilidade_real(candles,direcao)
             if prob_real < PROB_MIN:
                 continue
 
@@ -237,20 +212,18 @@ def loop_ativos_final():
             if sinal_em_analise.acquire(blocking=False):
                 horario_entrada = proxima_vela_horario()
                 enviar_sinal(
-                    ativo,
-                    direcao,
-                    confianca,
+                    ativo,direcao,confianca,
                     "Price Action + Suportes/Resistências + Probabilidade Avançada",
                     entrada=f"Agora ({horario_entrada})"
                 )
-                log_sinal(ativo, direcao, confianca, None)
+                log_sinal(ativo,direcao,confianca,None)
 
-                threading.Thread(target=resultado_real, args=({
-                    "ativo": ativo,
-                    "direcao": direcao,
-                    "horario_entrada": horario_entrada,
-                    "tempo_espera": TIMEFRAME + WAIT_BUFFER,
-                    "confianca": confianca
+                threading.Thread(target=resultado_real,args=({
+                    "ativo":ativo,
+                    "direcao":direcao,
+                    "horario_entrada":horario_entrada,
+                    "tempo_espera":TIMEFRAME+WAIT_BUFFER,
+                    "confianca":confianca
                 },)).start()
 
                 cooldowns[ativo] = now_ts + TIMEFRAME
@@ -259,7 +232,7 @@ def loop_ativos_final():
         time.sleep(0.1)
 
 # ===============================
-# START COM PROTEÇÃO GLOBAL
+# START
 # ===============================
 if __name__ == "__main__":
     while True:
