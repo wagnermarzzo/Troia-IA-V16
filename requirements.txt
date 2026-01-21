@@ -1,4 +1,2 @@
-websocket-client
 requests
-pytz
-python-dateutil
+websocket-client
