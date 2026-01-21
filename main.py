@@ -1,176 +1,174 @@
-import websocket
-import json
-import time
-import threading
-import requests
+import websocket, json, time, requests
 from datetime import datetime, timezone, timedelta
-from flask import Flask, jsonify
 
 # ===============================
-# CREDENCIAIS (JÁ INSERIDAS)
+# CONFIGURAÇÃO
 # ===============================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
+NUM_CANDLES_ANALISE = 20
 TIMEFRAME = 300  # 5 minutos
-MAX_SINAIS_30M = 3
+CONF_MIN = 55
+WAIT_AFTER_VELA = 310  # espera fechamento vela 5min + buffer
+RECONNECT_DELAY = 3  # segundos caso WS caia
+
+SINAIS_MAX_30MIN = 3
+sinais_30min = []
 
 # ===============================
-# ATIVOS (FOREX + OTC)
+# LISTA COMPLETA DE ATIVOS
 # ===============================
-ATIVOS = [
-    "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD","frxUSDCAD",
-    "frxUSDCHF","frxEURJPY","frxGBPJPY","frxEURGBP",
-    "frxEURUSD_otc","frxGBPUSD_otc","frxUSDJPY_otc",
-    "frxAUDUSD_otc","frxUSDCAD_otc","frxEURJPY_otc"
+ATIVOS_FOREX = [
+    "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD",
+    "frxUSDCAD", "frxUSDCHF", "frxNZDUSD", "frxEURGBP",
+    "frxEURJPY", "frxEURCHF", "frxEURAUD", "frxEURCAD",
+    "frxEURNZD", "frxGBPJPY", "frxGBPCHF", "frxGBPAUD",
+    "frxGBPCAD", "frxGBPNZD", "frxAUDJPY", "frxAUDNZD",
+    "frxAUDCAD", "frxAUDCHF", "frxCADJPY", "frxCADCHF",
+    "frxCHFJPY", "frxNZDJPY", "frxNZDCAD", "frxNZDCHF"
 ]
 
-# ===============================
-# CONTROLE GLOBAL
-# ===============================
-SINAL_ATIVO = False
-ATIVO_ATUAL = None
-DIRECAO_ATUAL = None
-HORARIO_ENTRADA = None
+ATIVOS_OTC = [
+    "frxUSDOLLAR", "frxUSDRUB", "frxUSDSGD", "frxUSDHKD",
+    "frxUSDTWD", "frxUSDTRY", "frxUSDKRW", "frxUSDSEK",
+    "frxUSDNOK", "frxUSDDKK", "frxUSDZAR"
+]
 
-SINAIS_30M = []
-STATS = {a: {"win": 0, "loss": 0} for a in ATIVOS}
-
-# ===============================
-# FLASK – PAINEL WEB REAL
-# ===============================
-app = Flask(__name__)
-
-@app.route("/")
-def painel():
-    return jsonify({
-        "bot": "TROIA v24 STABLE",
-        "status": "ONLINE",
-        "sinal_ativo": SINAL_ATIVO,
-        "ativo_atual": ATIVO_ATUAL,
-        "direcao": DIRECAO_ATUAL,
-        "sinais_ultimos_30m": len(SINAIS_30M),
-        "stats": STATS
-    })
-
-def run_flask():
-    app.run(host="0.0.0.0", port=8080)
+ATIVOS = ATIVOS_FOREX + ATIVOS_OTC
 
 # ===============================
 # TELEGRAM
 # ===============================
-def tg(msg):
+def enviar_sinal(ativo, direcao, confianca, estrategia, entrada="Próxima vela", motivo=None, resultado=None):
+    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    nome_bot = "SENTINEL IA – SINAL ENCONTRADO"
+
+    msg = f"💥 <b>{nome_bot}</b>\n" \
+          f"📊 <b>Ativo:</b> {ativo}\n" \
+          f"🎯 <b>Direção:</b> {direcao}\n" \
+          f"🧠 <b>Estratégia:</b> {estrategia}\n" \
+          f"⏱️ <b>Entrada:</b> {entrada}\n" \
+          f"📈 <b>Confiança:</b> {confianca}%\n"
+
+    if motivo:
+        msg += f"📋 <b>Motivo da Entrada:</b> {motivo}\n"
+
+    if resultado:
+        cor = "🟢 Green" if resultado == "Green" else "🔴 Red"
+        msg += f"✅ <b>Resultado:</b> {cor}"
+
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode":"HTML"},
             timeout=5
         )
-    except:
-        pass
+    except Exception as e:
+        print("Erro ao enviar Telegram:", e)
 
 # ===============================
-# DERIV – CANDLES REAIS
+# DIREÇÃO E CONFIANÇA
 # ===============================
-def get_candles(symbol, count=20):
-    ws = websocket.create_connection(
-        "wss://ws.deriv.com/websockets/v3?app_id=1089",
-        timeout=10
-    )
-    ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-    ws.recv()
+def direcao_candle(candle):
+    return "CALL" if candle["close"] > candle["open"] else "PUT"
 
-    ws.send(json.dumps({
-        "ticks_history": symbol,
-        "count": count,
-        "granularity": TIMEFRAME,
-        "style": "candles"
-    }))
-    r = json.loads(ws.recv())
-    ws.close()
-    return r["candles"]
+def calcular_confianca(candles):
+    call = sum(1 for c in candles if c["close"] > c["open"])
+    put = sum(1 for c in candles if c["close"] < c["open"])
+    total = len(candles)
+    maior = max(call, put)
+    return int(maior/total*100)
 
 # ===============================
-# ANÁLISE (PRICE ACTION)
+# PRÓXIMA VELA
+# ===============================
+def proxima_vela_horario():
+    now = datetime.now(timezone.utc)
+    next_minute = (now + timedelta(minutes=5)).replace(second=0, microsecond=0)
+    return next_minute.strftime("%H:%M:%S UTC")
+
+# ===============================
+# PEGAR CANDLES
+# ===============================
+def pegar_candles(ativo, count=NUM_CANDLES_ANALISE):
+    while True:
+        try:
+            ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=10)
+            ws.send(json.dumps({"authorize": DERIV_API_KEY}))
+            end_timestamp = int(time.time())
+            ws.send(json.dumps({
+                "ticks_history": ativo,
+                "style": "candles",
+                "granularity": TIMEFRAME,
+                "count": count,
+                "end": end_timestamp
+            }))
+            data = json.loads(ws.recv())
+            ws.close()
+            if "candles" in data:
+                return data["candles"][-count:]
+        except:
+            time.sleep(RECONNECT_DELAY)
+
+# ===============================
+# ANALISA 1 ATIVO
 # ===============================
 def analisar_ativo(ativo):
-    candles = get_candles(ativo, 10)
-    verdes = sum(1 for c in candles if c["close"] > c["open"])
-    vermelhos = len(candles) - verdes
+    global sinais_30min
+    agora = datetime.now(timezone.utc)
+    sinais_30min = [s for s in sinais_30min if (agora - s).total_seconds() < 1800]
+    if len(sinais_30min) >= SINAIS_MAX_30MIN:
+        return None
 
-    if verdes >= 7:
-        return "CALL", 70 + verdes * 3
-    if vermelhos >= 7:
-        return "PUT", 70 + vermelhos * 3
+    candles = pegar_candles(ativo)
+    direcao = direcao_candle(candles[-1])
+    conf = calcular_confianca(candles)
+    horario_entrada = proxima_vela_horario()
+
+    entrada_tipo = "Agora (mesma vela)" if conf >= 70 else "Próxima vela"
+    motivo = f"Price Action + Suportes/Resistências + Tendência detectada"
+
+    if conf >= CONF_MIN:
+        enviar_sinal(ativo, direcao, conf, "Price Action + Suportes/Resistências", entrada=entrada_tipo, motivo=motivo)
+        sinais_30min.append(agora)
+        return {"ativo": ativo, "direcao": direcao, "horario_entrada": horario_entrada}
     return None
 
 # ===============================
-# MOTOR PRINCIPAL (ESTÁVEL)
+# RESULTADO REAL
 # ===============================
-def iniciar_troia():
-    global SINAL_ATIVO, ATIVO_ATUAL, DIRECAO_ATUAL
+def resultado_real(ativo, direcao):
+    candles = pegar_candles(ativo, count=1)
+    candle = candles[-1]
+    direcao_real = direcao_candle(candle)
+    if direcao_real == direcao:
+        enviar_sinal(ativo, direcao, 0, "Price Action + Suportes/Resistências", resultado="Green")
+        return "Green"
+    else:
+        enviar_sinal(ativo, direcao, 0, "Price Action + Suportes/Resistências", resultado="Red")
+        return "Red"
 
-    tg("🤖 TROIA v24 STABLE ONLINE")
-    idx = 0
-
+# ===============================
+# LOOP PRINCIPAL
+# ===============================
+def loop_ativos():
+    enviar_sinal("N/A","N/A",0,"Iniciando Bot Sentinel IA – Painel Profissional")
     while True:
-
-        agora = datetime.utcnow()
-        SINAIS_30M[:] = [t for t in SINAIS_30M if (agora - t).seconds < 1800]
-
-        # LIMITE 1–3 SINAIS / 30 MIN
-        if len(SINAIS_30M) >= MAX_SINAIS_30M:
-            time.sleep(20)
-            continue
-
-        # BLOQUEIO SE EXISTE SINAL
-        if SINAL_ATIVO:
-            time.sleep(TIMEFRAME)
+        for ativo in ATIVOS:
             try:
-                candle = get_candles(ATIVO_ATUAL, 1)[-1]
-                real = "CALL" if candle["close"] > candle["open"] else "PUT"
-                green = real == DIRECAO_ATUAL
-                STATS[ATIVO_ATUAL]["win" if green else "loss"] += 1
-
-                tg(f"📊 RESULTADO\n{ATIVO_ATUAL}\n{'GREEN 🟢' if green else 'RED 🔴'}")
-            except:
-                pass
-
-            SINAL_ATIVO = False
-            time.sleep(10)
-            continue
-
-        # FILA DE ATIVOS
-        ativo = ATIVOS[idx % len(ATIVOS)]
-        idx += 1
-
-        try:
-            r = analisar_ativo(ativo)
-            if r:
-                direcao, conf = r
-                SINAL_ATIVO = True
-                ATIVO_ATUAL = ativo
-                DIRECAO_ATUAL = direcao
-                SINAIS_30M.append(datetime.utcnow())
-
-                entrada = (datetime.utcnow() + timedelta(seconds=TIMEFRAME)).strftime("%H:%M UTC")
-
-                tg(
-                    f"🔥 SINAL TROIA\n"
-                    f"Ativo: {ativo}\n"
-                    f"Direção: {direcao}\n"
-                    f"Entrada: {entrada}\n"
-                    f"Confiança: {conf}%"
-                )
-        except:
-            pass
-
-        time.sleep(3)
+                res = analisar_ativo(ativo)
+                if res:
+                    time.sleep(WAIT_AFTER_VELA)
+                    resultado_real(res["ativo"], res["direcao"])
+                else:
+                    time.sleep(2)
+            except Exception as e:
+                enviar_sinal("Erro", "N/A", 0, f"Erro no ativo {ativo}: {e}")
 
 # ===============================
 # START
 # ===============================
 if __name__ == "__main__":
-    threading.Thread(target=run_flask).start()
-    iniciar_troia()
+    loop_ativos()
