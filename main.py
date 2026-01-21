@@ -11,12 +11,9 @@ TELEGRAM_CHAT_ID = "-1003656750711"
 
 TIMEFRAME = 300  # 5 minutos
 CONF_MIN = 55
-SINAIS_MAX_30MIN = 5
 WAIT_BUFFER = 10
+RECONNECT_MAX = 5
 RECONNECT_DELAY = 3
-
-sinais_30min = []
-sinal_em_analise = threading.Lock()
 
 LOG_FILE = "sinais_log.csv"
 
@@ -93,13 +90,12 @@ def proxima_vela_horario():
     return next_minute.strftime("%H:%M:%S UTC")
 
 # ===============================
-# PEGAR CANDLES COM RETRY
+# PEGAR CANDLES COM RETRY EXPONENCIAL
 # ===============================
 def pegar_candles(ativo, count=20):
-    tentativas = 0
-    while tentativas < 5:
+    for tentativa in range(1, RECONNECT_MAX + 1):
         try:
-            ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=10)
+            ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=20)
             ws.send(json.dumps({"authorize": DERIV_API_KEY}))
             end_timestamp = int(time.time())
             ws.send(json.dumps({
@@ -114,9 +110,8 @@ def pegar_candles(ativo, count=20):
             if "candles" in data:
                 return data["candles"][-count:]
         except Exception as e:
-            tentativas += 1
-            print(f"Tentativa {tentativas} falhou para {ativo}: {e}")
-            time.sleep(RECONNECT_DELAY)
+            print(f"Tentativa {tentativa} falhou para {ativo}: {e}")
+            time.sleep(RECONNECT_DELAY * tentativa)  # retry exponencial
     return []
 
 # ===============================
@@ -133,13 +128,10 @@ def log_sinal(ativo, direcao, confianca, resultado):
 # ===============================
 # RESULTADO REAL
 # ===============================
-def resultado_real(res):
+def resultado_real(ativo, direcao, horario_entrada):
     try:
-        ativo = res["ativo"]
-        direcao = res["direcao"]
-        tempo_espera = res["tempo_espera"]
-
-        time.sleep(tempo_espera)
+        # espera o fechamento da vela + buffer
+        time.sleep(TIMEFRAME + WAIT_BUFFER)
         candles = pegar_candles(ativo, count=1)
         if not candles:
             resultado = "Erro"
@@ -152,39 +144,35 @@ def resultado_real(res):
             direcao,
             0,
             "Price Action + Suportes/Resistências",
-            entrada=f"{res['horario_entrada']} (concluído)",
+            entrada=f"{horario_entrada} (concluído)",
             resultado=resultado
         )
         log_sinal(ativo, direcao, 0, resultado)
     finally:
+        # libera o lock para analisar o próximo ativo
         sinal_em_analise.release()
 
 # ===============================
 # ANALISA 1 ATIVO
 # ===============================
 def analisar_ativo(ativo):
-    global sinais_30min
-
     agora = datetime.now(timezone.utc)
-    sinais_30min = [s for s in sinais_30min if (agora - s).total_seconds() < 1800]
-    if len(sinais_30min) >= SINAIS_MAX_30MIN:
-        return None
-
     candles = pegar_candles(ativo)
     if not candles:
-        return None
+        print(f"Não foi possível pegar candles para {ativo}. Pulando...")
+        return False
 
     direcao = direcao_candle(candles[-1])
     conf = calcular_confianca(candles)
     horario_entrada = proxima_vela_horario()
-    
+
     # Alerta se OTC
     motivo = "Price Action + Suportes/Resistências + Tendência detectada"
     if ativo in ATIVOS_OTC:
         motivo += " ⚠ OTC: baixa liquidez"
 
     if conf >= CONF_MIN:
-        sinal_em_analise.acquire()
+        sinal_em_analise.acquire()  # trava para não analisar outro ativo
         enviar_sinal(
             ativo,
             direcao,
@@ -193,31 +181,32 @@ def analisar_ativo(ativo):
             entrada=f"Próxima vela ({horario_entrada})",
             motivo=motivo
         )
-        sinais_30min.append(agora)
         log_sinal(ativo, direcao, conf, None)
-        threading.Thread(target=resultado_real, args=({
-            "ativo": ativo,
-            "direcao": direcao,
-            "horario_entrada": horario_entrada,
-            "tempo_espera": TIMEFRAME + WAIT_BUFFER
-        },)).start()
+        threading.Thread(target=resultado_real, args=(ativo, direcao, horario_entrada)).start()
         return True
-    return None
+    return False
 
 # ===============================
-# LOOP PRINCIPAL COM THREADS
+# LOOP PRINCIPAL (1 ATIVO POR VEZ)
 # ===============================
 def loop_ativos():
     enviar_sinal("N/A","N/A",0,"Iniciando Bot Sentinel IA – Painel Profissional")
     while True:
-        threads = []
         for ativo in ATIVOS:
-            t = threading.Thread(target=analisar_ativo, args=(ativo,))
-            t.start()
-            threads.append(t)
-            time.sleep(0.2)
-        # Não esperar join para rodar 24h contínuo
-        time.sleep(1)
+            # aguarda resultado do ativo anterior
+            sinal_em_analise.acquire()
+            sinal_em_analise.release()  # libera imediatamente para checagem
+            sucesso = analisar_ativo(ativo)
+            if sucesso:
+                # espera até o resultado real ser enviado antes de continuar
+                sinal_em_analise.acquire()
+                sinal_em_analise.release()
+            time.sleep(1)  # evita loop muito rápido
+
+# ===============================
+# LOCK GLOBAL
+# ===============================
+sinal_em_analise = threading.Lock()
 
 # ===============================
 # START
