@@ -13,7 +13,6 @@ TIMEFRAME = 300  # 5 minutos
 CONF_MIN = 55
 WAIT_BUFFER = 10  # segundos extras
 RECONNECT_DELAY = 3
-
 LOG_FILE = "sinais_log.csv"
 sinal_em_analise = threading.Lock()
 
@@ -41,7 +40,7 @@ ATIVOS = ATIVOS_FOREX + ATIVOS_OTC
 # ===============================
 # TELEGRAM
 # ===============================
-def enviar_sinal(ativo, direcao, confianca, estrategia, entrada="Próxima vela", motivo=None, resultado=None):
+def enviar_sinal(ativo, direcao, confianca, estrategia, entrada="Próxima vela", resultado=None):
     now = datetime.now(timezone.utc).strftime("%H:%M UTC")
     nome_bot = "SENTINEL IA – SINAL ENCONTRADO"
 
@@ -51,9 +50,6 @@ def enviar_sinal(ativo, direcao, confianca, estrategia, entrada="Próxima vela",
           f"🧠 <b>Estratégia:</b> {estrategia}\n" \
           f"⏱️ <b>Entrada:</b> {entrada}\n" \
           f"🧮 <b>Confiança:</b> {confianca}%\n"
-
-    if motivo:
-        msg += f"📋 <b>Motivo:</b> {motivo}\n"
 
     if resultado:
         cor = "🟢 Green" if resultado == "Green" else "🔴 Red"
@@ -75,12 +71,54 @@ def direcao_candle(candle):
     return "CALL" if candle["close"] > candle["open"] else "PUT"
 
 def calcular_confianca(candles):
+    """Calcula confiança real baseada em histórico de 20 candles."""
     call = sum(1 for c in candles if c["close"] > c["open"])
     put = sum(1 for c in candles if c["close"] < c["open"])
     total = len(candles)
     maior = max(call, put)
     confianca = int(maior / total * 100) if total > 0 else 0
     return confianca
+
+# ===============================
+# CONFIRMAÇÃO DE CANDLES
+# ===============================
+def direcao_confirmada(candles, n=3):
+    ultimos = candles[-n:]
+    calls = sum(1 for c in ultimos if c["close"] > c["open"])
+    puts = sum(1 for c in ultimos if c["close"] < c["open"])
+    if calls == n:
+        return "CALL"
+    elif puts == n:
+        return "PUT"
+    else:
+        return None
+
+# ===============================
+# TENDÊNCIA DE MÉDIO PRAZO
+# ===============================
+def tendencia_medio_prazo(candles, periodo=20):
+    if len(candles) < periodo:
+        periodo = len(candles)
+    fechamento_inicio = candles[-periodo]["close"]
+    fechamento_fim = candles[-1]["close"]
+    return "CALL" if fechamento_fim > fechamento_inicio else "PUT"
+
+# ===============================
+# FILTRO DE VOLATILIDADE
+# ===============================
+def candle_valido(candle, min_pct=0.0003):
+    diff = abs(candle["close"] - candle["open"])
+    return diff / candle["open"] >= min_pct
+
+# ===============================
+# SUPORTE/RESISTÊNCIA SIMPLES
+# ===============================
+def suporte_resistencia(candles, periodo=50):
+    highs = [c["high"] for c in candles[-periodo:]]
+    lows = [c["low"] for c in candles[-periodo:]]
+    resistencia = max(highs)
+    suporte = min(lows)
+    return suporte, resistencia
 
 # ===============================
 # PRÓXIMA VELA
@@ -93,7 +131,7 @@ def proxima_vela_horario():
 # ===============================
 # PEGAR CANDLES COM RETRY
 # ===============================
-def pegar_candles(ativo, count=20):
+def pegar_candles(ativo, count=50):
     tentativas = 0
     while tentativas < 5:
         try:
@@ -144,7 +182,7 @@ def resultado_real(res):
             res["ativo"],
             res["direcao"],
             res["confianca"],
-            "Price Action + Suportes/Resistências",
+            "Price Action + Suportes/Resistências + Probabilidade Avançada",
             entrada=f"{res['horario_entrada']} (concluído)",
             resultado=resultado
         )
@@ -154,56 +192,74 @@ def resultado_real(res):
             sinal_em_analise.release()
 
 # ===============================
-# LOOP PRINCIPAL OTIMIZADO
+# LOOP PRINCIPAL AVANÇADO COM PROBABILIDADE
 # ===============================
-def loop_ativos():
+def loop_ativos_probabilidade():
     enviar_sinal("N/A", "N/A", 0, "Iniciando Bot Sentinel IA – Painel Profissional")
-    cooldowns = {ativo: 0 for ativo in ATIVOS}  # timestamp de último sinal por ativo
+    cooldowns = {ativo: 0 for ativo in ATIVOS}
+    ultimo_sinal = {ativo: None for ativo in ATIVOS}
 
     while True:
         now_ts = time.time()
         for ativo in ATIVOS:
             if now_ts < cooldowns[ativo]:
-                continue  # ainda no cooldown
+                continue
 
-            candles = pegar_candles(ativo)
+            candles = pegar_candles(ativo, count=50)
             if not candles:
                 continue
 
-            direcao = direcao_candle(candles[-1])
-            confianca = calcular_confianca(candles)
+            # FILTROS AVANÇADOS
+            direcao = direcao_confirmada(candles, n=3)
+            if not direcao:
+                continue
 
-            if confianca >= CONF_MIN:
-                if sinal_em_analise.acquire(blocking=False):
-                    horario_entrada = proxima_vela_horario()
-                    motivo = "Price Action + Suportes/Resistências"
-                    if ativo in ATIVOS_OTC:
-                        motivo += " ⚠ OTC: baixa liquidez"
+            if not candle_valido(candles[-1]):
+                continue
 
-                    enviar_sinal(
-                        ativo,
-                        direcao,
-                        confianca,
-                        "Price Action + Suportes/Resistências",
-                        entrada=f"Agora ({horario_entrada})",
-                        motivo=motivo
-                    )
-                    log_sinal(ativo, direcao, confianca, None)
+            confianca = calcular_confianca(candles[-20:])
+            tendencia = tendencia_medio_prazo(candles)
+            if direcao != tendencia:
+                continue
 
-                    threading.Thread(target=resultado_real, args=({
-                        "ativo": ativo,
-                        "direcao": direcao,
-                        "horario_entrada": horario_entrada,
-                        "tempo_espera": TIMEFRAME + WAIT_BUFFER,
-                        "confianca": confianca
-                    },)).start()
+            min_conf = CONF_MIN
+            if ativo in ATIVOS_OTC:
+                min_conf += 15
+            if confianca < min_conf:
+                continue
 
-                    cooldowns[ativo] = now_ts + TIMEFRAME  # evita re-sinal rápido
+            if ultimo_sinal[ativo] == direcao:
+                continue
 
-        time.sleep(0.1)  # pausa curta para CPU
+            # SUPORTE/RESISTÊNCIA (para cálculo interno, sem enviar)
+            suporte, resistencia = suporte_resistencia(candles)
+
+            if sinal_em_analise.acquire(blocking=False):
+                horario_entrada = proxima_vela_horario()
+                enviar_sinal(
+                    ativo,
+                    direcao,
+                    confianca,
+                    "Price Action + Suportes/Resistências + Probabilidade Avançada",
+                    entrada=f"Agora ({horario_entrada})"
+                )
+                log_sinal(ativo, direcao, confianca, None)
+
+                threading.Thread(target=resultado_real, args=({
+                    "ativo": ativo,
+                    "direcao": direcao,
+                    "horario_entrada": horario_entrada,
+                    "tempo_espera": TIMEFRAME + WAIT_BUFFER,
+                    "confianca": confianca
+                },)).start()
+
+                cooldowns[ativo] = now_ts + TIMEFRAME
+                ultimo_sinal[ativo] = direcao
+
+        time.sleep(0.1)
 
 # ===============================
 # START
 # ===============================
 if __name__ == "__main__":
-    loop_ativos()
+    loop_ativos_probabilidade()
