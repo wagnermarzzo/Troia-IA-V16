@@ -1,12 +1,13 @@
 import websocket, json, time, requests, csv, os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import threading
+import traceback
 
 # ===============================
 # CONFIGURAÇÃO
 # ===============================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
-TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ITHTdVU"
+TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2HTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 TIMEFRAME = 300  # 5 minutos
@@ -19,10 +20,11 @@ CONF_MIN = 50
 CONF_MAX = 70
 
 LOG_FILE = "sinais_log.csv"
-HISTORICO_RESULTADOS = []  # para ajustar confiança dinamicamente
+HISTORICO_RESULTADOS = []  # Green/Red
+TOTAL_SINAIS = 0
 
 # ===============================
-# LISTA COMPLETA DE ATIVOS (FOREX + OTC)
+# ATIVOS
 # ===============================
 ATIVOS_FOREX = [
     "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD",
@@ -48,26 +50,39 @@ ATIVOS = ATIVOS_FOREX + ATIVOS_OTC
 sinal_em_analise = threading.Lock()
 
 # ===============================
-# TELEGRAM
+# FUNÇÕES TELEGRAM
 # ===============================
 def enviar_ou_editar_sinal(message_id=None, ativo=None, direcao=None, confianca=0,
-                           estrategia=None, entrada="Agora", motivo=None, resultado=None, horario_fechamento=None):
-    nome_bot = "SENTINEL IA – SINAL ENCONTRADO"
-    msg = f"💥 <b>{nome_bot}</b>\n" \
-          f"📊 <b>Ativo:</b> {ativo}\n" \
-          f"🎯 <b>Direção:</b> {direcao}\n" \
-          f"🧠 <b>Estratégia:</b> {estrategia}\n" \
-          f"⏱️ <b>Entrada:</b> {entrada}\n" \
-          f"🧮 <b>Confiança:</b> {confianca}%\n"
-    if motivo:
-        msg += f"📋 <b>Motivo:</b> {motivo}\n"
-    if resultado:
-        cor = "🟢 Green" if resultado == "Green" else "🔴 Red"
-        if horario_fechamento:
-            msg += f"⏱️ <b>Fechamento da vela:</b> {horario_fechamento}\n"
-        msg += f"✅ <b>Resultado:</b> {cor}"
-
+                           estrategia=None, entrada="Agora", motivo=None, resultado=None,
+                           horario_fechamento=None, dashboard=False):
     try:
+        nome_bot = "SENTINEL IA – SINAL ENCONTRADO"
+        msg = f"💥 <b>{nome_bot}</b>\n"
+        if dashboard:
+            greens = HISTORICO_RESULTADOS.count("Green")
+            reds = HISTORICO_RESULTADOS.count("Red")
+            total = len(HISTORICO_RESULTADOS)
+            taxa = int((greens/total)*100) if total > 0 else 0
+            msg += f"📊 <b>Mini Dashboard</b>\n" \
+                   f"🧮 Total sinais: {TOTAL_SINAIS}\n" \
+                   f"🟢 Green: {greens} | 🔴 Red: {reds}\n" \
+                   f"🎯 Taxa de acerto: {taxa}%\n"
+            if ativo:
+                msg += f"📌 Último sinal: {ativo} ({direcao}, {confianca}%)\n"
+        else:
+            msg += f"📊 <b>Ativo:</b> {ativo}\n" \
+                   f"🎯 <b>Direção:</b> {direcao}\n" \
+                   f"🧠 <b>Estratégia:</b> {estrategia}\n" \
+                   f"⏱️ <b>Entrada:</b> {entrada}\n" \
+                   f"🧮 <b>Confiança:</b> {confianca}%\n"
+            if motivo:
+                msg += f"📋 <b>Motivo:</b> {motivo}\n"
+            if resultado:
+                cor = "🟢 Green" if resultado == "Green" else "🔴 Red"
+                if horario_fechamento:
+                    msg += f"⏱️ <b>Fechamento da vela:</b> {horario_fechamento}\n"
+                msg += f"✅ <b>Resultado:</b> {cor}"
+
         if message_id:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
@@ -83,7 +98,6 @@ def enviar_ou_editar_sinal(message_id=None, ativo=None, direcao=None, confianca=
             return r.json().get("result", {}).get("message_id")
     except Exception as e:
         print("Erro Telegram:", e)
-        return None
 
 # ===============================
 # DIREÇÃO E CONFIANÇA
@@ -149,7 +163,8 @@ def log_sinal(ativo, direcao, confianca, resultado):
 # ===============================
 # RESULTADO REAL
 # ===============================
-def resultado_real(ativo, direcao, message_id):
+def resultado_real(ativo, direcao, message_id, confianca):
+    global TOTAL_SINAIS
     try:
         time.sleep(TIMEFRAME + WAIT_BUFFER)
         candles = pegar_candles(ativo, count=1)
@@ -161,21 +176,23 @@ def resultado_real(ativo, direcao, message_id):
             direcao_real = direcao_candle(candle_fechamento)
             resultado = "Green" if direcao_real == direcao else "Red"
             horario_fechamento = datetime.fromtimestamp(candle_fechamento["epoch"], tz=timezone.utc).strftime("%H:%M:%S UTC")
-        
-        # Atualiza histórico e confiança dinâmica
+
         if resultado in ["Green", "Red"]:
             HISTORICO_RESULTADOS.append(resultado)
             if len(HISTORICO_RESULTADOS) > 20:
                 HISTORICO_RESULTADOS.pop(0)
-        
         enviar_ou_editar_sinal(
             message_id=message_id,
             ativo=ativo,
             direcao=direcao,
             resultado=resultado,
-            horario_fechamento=horario_fechamento
+            horario_fechamento=horario_fechamento,
+            confianca=confianca
         )
-        log_sinal(ativo, direcao, 0, resultado)
+        log_sinal(ativo, direcao, confianca, resultado)
+        TOTAL_SINAIS += 1
+        # Atualiza mini-dashboard
+        enviar_ou_editar_sinal(dashboard=True, ativo=ativo, direcao=direcao, confianca=confianca)
     finally:
         sinal_em_analise.release()
 
@@ -208,29 +225,32 @@ def analisar_ativo(ativo):
             motivo=motivo
         )
         log_sinal(ativo, direcao, conf_atual, None)
-        threading.Thread(target=resultado_real, args=(ativo, direcao, msg_id)).start()
+        threading.Thread(target=resultado_real, args=(ativo, direcao, msg_id, conf_atual)).start()
         return True
     return False
 
 # ===============================
-# LOOP PRINCIPAL
+# LOOP PRINCIPAL COM AUTO-RESTART
 # ===============================
 def loop_ativos():
-    enviar_ou_editar_sinal(
-        ativo="N/A",
-        direcao="N/A",
-        confianca=0,
-        estrategia="Iniciando Bot Sentinel IA – Painel Profissional"
-    )
     while True:
-        for ativo in ATIVOS:
-            sinal_em_analise.acquire()
-            sinal_em_analise.release()
-            sucesso = analisar_ativo(ativo)
-            if sucesso:
+        try:
+            # Envia dashboard inicial
+            enviar_ou_editar_sinal(dashboard=True)
+            for ativo in ATIVOS:
                 sinal_em_analise.acquire()
                 sinal_em_analise.release()
-            time.sleep(1)
+                sucesso = analisar_ativo(ativo)
+                if sucesso:
+                    # Aguarda o fechamento do ativo atual antes de continuar
+                    while sinal_em_analise.locked():
+                        time.sleep(1)
+                time.sleep(1)
+        except Exception as e:
+            print("Erro no loop principal:", e)
+            print(traceback.format_exc())
+            time.sleep(5)
+            print("Tentando reiniciar loop...")
 
 # ===============================
 # START
