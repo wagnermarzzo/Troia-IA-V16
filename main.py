@@ -8,13 +8,12 @@ DERIV_API_KEY = "UEISANwBEI9sPVR"
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
-NUM_CANDLES_ANALISE = 20
 TIMEFRAME = 300  # 5 minutos
 CONF_MIN = 55
-WAIT_AFTER_VELA = 310  # espera fechamento vela 5min + buffer
-RECONNECT_DELAY = 3  # segundos caso WS caia
-
 SINAIS_MAX_30MIN = 3
+WAIT_BUFFER = 10  # segundos extras após fechamento da vela
+RECONNECT_DELAY = 3
+
 sinais_30min = []
 
 # ===============================
@@ -49,11 +48,10 @@ def enviar_sinal(ativo, direcao, confianca, estrategia, entrada="Próxima vela",
           f"📊 <b>Ativo:</b> {ativo}\n" \
           f"🎯 <b>Direção:</b> {direcao}\n" \
           f"🧠 <b>Estratégia:</b> {estrategia}\n" \
-          f"⏱️ <b>Entrada:</b> {entrada}\n" \
-          f"📈 <b>Confiança:</b> {confianca}%\n"
+          f"⏱️ <b>Entrada:</b> {entrada}\n"
 
     if motivo:
-        msg += f"📋 <b>Motivo da Entrada:</b> {motivo}\n"
+        msg += f"📋 <b>Motivo:</b> {motivo}\n"
 
     if resultado:
         cor = "🟢 Green" if resultado == "Green" else "🔴 Red"
@@ -86,13 +84,13 @@ def calcular_confianca(candles):
 # ===============================
 def proxima_vela_horario():
     now = datetime.now(timezone.utc)
-    next_minute = (now + timedelta(minutes=5)).replace(second=0, microsecond=0)
+    next_minute = (now + timedelta(seconds=TIMEFRAME)).replace(second=0, microsecond=0)
     return next_minute.strftime("%H:%M:%S UTC")
 
 # ===============================
 # PEGAR CANDLES
 # ===============================
-def pegar_candles(ativo, count=NUM_CANDLES_ANALISE):
+def pegar_candles(ativo, count=20):
     while True:
         try:
             ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=10)
@@ -118,6 +116,7 @@ def pegar_candles(ativo, count=NUM_CANDLES_ANALISE):
 def analisar_ativo(ativo):
     global sinais_30min
     agora = datetime.now(timezone.utc)
+    # Limita sinais em 30 minutos
     sinais_30min = [s for s in sinais_30min if (agora - s).total_seconds() < 1800]
     if len(sinais_30min) >= SINAIS_MAX_30MIN:
         return None
@@ -126,29 +125,43 @@ def analisar_ativo(ativo):
     direcao = direcao_candle(candles[-1])
     conf = calcular_confianca(candles)
     horario_entrada = proxima_vela_horario()
-
-    entrada_tipo = "Agora (mesma vela)" if conf >= 70 else "Próxima vela"
-    motivo = f"Price Action + Suportes/Resistências + Tendência detectada"
+    motivo = "Price Action + Suportes/Resistências + Tendência detectada"
 
     if conf >= CONF_MIN:
-        enviar_sinal(ativo, direcao, conf, "Price Action + Suportes/Resistências", entrada=entrada_tipo, motivo=motivo)
+        enviar_sinal(
+            ativo,
+            direcao,
+            conf,
+            "Price Action + Suportes/Resistências",
+            entrada=f"Próxima vela ({horario_entrada})",
+            motivo=motivo
+        )
         sinais_30min.append(agora)
-        return {"ativo": ativo, "direcao": direcao, "horario_entrada": horario_entrada}
+        return {"ativo": ativo, "direcao": direcao, "horario_entrada": horario_entrada, "tempo_espera": TIMEFRAME + WAIT_BUFFER}
     return None
 
 # ===============================
 # RESULTADO REAL
 # ===============================
-def resultado_real(ativo, direcao):
+def resultado_real(res):
+    ativo = res["ativo"]
+    direcao = res["direcao"]
+    tempo_espera = res["tempo_espera"]
+
+    time.sleep(tempo_espera)  # espera fechamento da próxima vela
     candles = pegar_candles(ativo, count=1)
-    candle = candles[-1]
-    direcao_real = direcao_candle(candle)
-    if direcao_real == direcao:
-        enviar_sinal(ativo, direcao, 0, "Price Action + Suportes/Resistências", resultado="Green")
-        return "Green"
-    else:
-        enviar_sinal(ativo, direcao, 0, "Price Action + Suportes/Resistências", resultado="Red")
-        return "Red"
+    direcao_real = direcao_candle(candles[-1])
+
+    resultado = "Green" if direcao_real == direcao else "Red"
+    enviar_sinal(
+        ativo,
+        direcao,
+        0,
+        "Price Action + Suportes/Resistências",
+        entrada=f"{res['horario_entrada']} (concluído)",
+        resultado=resultado
+    )
+    return resultado
 
 # ===============================
 # LOOP PRINCIPAL
@@ -160,10 +173,7 @@ def loop_ativos():
             try:
                 res = analisar_ativo(ativo)
                 if res:
-                    time.sleep(WAIT_AFTER_VELA)
-                    resultado_real(res["ativo"], res["direcao"])
-                else:
-                    time.sleep(2)
+                    resultado_real(res)  # espera o resultado antes de analisar o próximo ativo
             except Exception as e:
                 enviar_sinal("Erro", "N/A", 0, f"Erro no ativo {ativo}: {e}")
 
