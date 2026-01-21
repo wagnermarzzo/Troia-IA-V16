@@ -1,50 +1,37 @@
-import threading, time, json, sqlite3
-from datetime import datetime
-import requests, websocket
-from flask import Flask
+import websocket, json, time, threading, sqlite3, requests, math
+from datetime import datetime, timezone, timedelta
 
 # ===============================
-# CREDENCIAIS
+# CONFIGURAÇÃO
 # ===============================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
-# ===============================
-# ATIVOS (FOREX + OTC)
-# ===============================
+APP_ID = 1089
+GRANULARITY = 300  # 5 minutos
+MAX_SINAIS_30M = 3
+INTERVALO_CONTROLE = 1800
+
 ATIVOS = [
     "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD",
-    "frxUSDCAD","frxUSDCHF","frxNZDUSD","frxEURGBP",
-    "frxEURJPY","frxGBPJPY",
-    "OTC_EURUSD","OTC_GBPUSD","OTC_USDJPY",
-    "OTC_AUDUSD","OTC_USDCAD","OTC_USDCHF",
-    "OTC_EURGBP","OTC_EURJPY","OTC_GBPJPY"
+    "frxUSDCAD","frxUSDCHF","frxNZDUSD",
+    "frxEURUSD_otc","frxGBPUSD_otc","frxUSDJPY_otc"
 ]
 
-TIMEFRAME = 300  # 5 MIN
-VELAS_ANALISE = 50
-CONF_MIN = 65
-
 # ===============================
-# BANCO DE DADOS
+# DB IA
 # ===============================
-conn = sqlite3.connect("troia.db", check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS velas (
-    ativo TEXT, open REAL, high REAL, low REAL, close REAL, epoch INTEGER
+db = sqlite3.connect("troia_ai.db", check_same_thread=False)
+c = db.cursor()
+c.execute("""
+CREATE TABLE IF NOT EXISTS ativos (
+ ativo TEXT PRIMARY KEY,
+ sinais INT, greens INT, reds INT,
+ score REAL, cooldown INT
 )
 """)
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS sinais (
-    ativo TEXT, direcao TEXT, confianca INTEGER,
-    resultado TEXT, horario TEXT
-)
-""")
-conn.commit()
+db.commit()
 
 # ===============================
 # TELEGRAM
@@ -53,21 +40,20 @@ def tg(msg):
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode":"HTML"},
-            timeout=5
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode":"HTML"}, timeout=5
         )
     except:
         pass
 
 # ===============================
-# IA — FUNÇÕES
+# INDICADORES
 # ===============================
-def tendencia(candles):
-    altas = sum(1 for c in candles if c["close"] > c["open"])
-    baixas = len(candles) - altas
-    if altas > baixas: return "CALL"
-    if baixas > altas: return "PUT"
-    return None
+def ema(valores, periodo):
+    k = 2 / (periodo + 1)
+    ema_val = valores[0]
+    for v in valores[1:]:
+        ema_val = v * k + ema_val * (1 - k)
+    return ema_val
 
 def suporte_resistencia(candles):
     lows = [c["low"] for c in candles]
@@ -76,144 +62,110 @@ def suporte_resistencia(candles):
 
 def padrao_candle(c):
     corpo = abs(c["close"] - c["open"])
-    pavio = (c["high"] - c["low"]) - corpo
-    if corpo > pavio * 1.5:
-        return "FORTE"
-    return "FRACO"
-
-def calcular_confianca(tend, padrao):
-    conf = 50
-    if tend: conf += 15
-    if padrao == "FORTE": conf += 15
-    return conf
+    sombra = abs(c["high"] - c["low"])
+    if corpo > sombra * 0.6:
+        return "forca"
+    if corpo < sombra * 0.3:
+        return "indecisao"
+    return "neutro"
 
 # ===============================
-# DECISÃO FINAL
+# IA ATIVO
 # ===============================
-def analisar_ativo(ativo):
-    cursor.execute("""
-        SELECT open,high,low,close FROM velas
-        WHERE ativo=? ORDER BY epoch DESC LIMIT ?
-    """,(ativo,VELAS_ANALISE))
-    rows = cursor.fetchall()
-    if len(rows) < VELAS_ANALISE: return
+def get_ativo(ativo):
+    c.execute("SELECT * FROM ativos WHERE ativo=?", (ativo,))
+    r = c.fetchone()
+    if not r:
+        c.execute("INSERT INTO ativos VALUES (?,?,?,?,?,?)", (ativo,0,0,0,50,0))
+        db.commit()
+        return get_ativo(ativo)
+    return r
 
-    candles = [{"open":o,"high":h,"low":l,"close":c} for o,h,l,c in rows[::-1]]
+def update_ativo(ativo, green):
+    a = get_ativo(ativo)
+    sinais, greens, reds = a[1], a[2], a[3]
+    sinais += 1
+    greens += 1 if green else 0
+    reds += 0 if green else 1
+    winrate = greens / sinais * 100
+    score = winrate - reds * 5
+    c.execute("UPDATE ativos SET sinais=?,greens=?,reds=?,score=? WHERE ativo=?",
+              (sinais,greens,reds,score,ativo))
+    db.commit()
 
-    tend = tendencia(candles)
-    sup, res = suporte_resistencia(candles)
+# ===============================
+# MERCADO REAL
+# ===============================
+def get_candles(ativo, count=50):
+    ws = websocket.create_connection(f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}")
+    ws.send(json.dumps({"authorize": DERIV_API_KEY}))
+    ws.send(json.dumps({
+        "ticks_history": ativo,
+        "style": "candles",
+        "granularity": GRANULARITY,
+        "count": count
+    }))
+    data = json.loads(ws.recv())
+    ws.close()
+    return data["candles"]
+
+# ===============================
+# ANALISADOR
+# ===============================
+def analisar(ativo):
+    candles = get_candles(ativo)
+    closes = [c["close"] for c in candles]
+
+    ema20 = ema(closes[-20:], 20)
+    ema50 = ema(closes[-50:], 50)
+    suporte, resistencia = suporte_resistencia(candles[-20:])
     ultimo = candles[-1]
-    pad = padrao_candle(ultimo)
-    conf = calcular_confianca(tend, pad)
 
-    if conf >= CONF_MIN and tend:
-        enviar_sinal(ativo, tend, conf)
+    tendencia = "CALL" if ema20 > ema50 else "PUT"
+    if padrao_candle(ultimo) == "indecisao":
+        return None
 
-# ===============================
-# ENVIO DE SINAL
-# ===============================
-sinal_ativo = False
+    confianca = 60
+    if tendencia == "CALL" and ultimo["close"] > suporte:
+        confianca += 10
+    if tendencia == "PUT" and ultimo["close"] < resistencia:
+        confianca += 10
 
-def enviar_sinal(ativo, direcao, conf):
-    global sinal_ativo
-    if sinal_ativo: return
-    sinal_ativo = True
-
-    horario = datetime.utcnow().strftime("%H:%M UTC")
-    cursor.execute("""
-        INSERT INTO sinais VALUES (?,?,?,?,?)
-    """,(ativo,direcao,conf,"PENDENTE",horario))
-    conn.commit()
-
-    tg(
-        f"🔥 <b>SINAL IA TROIA v21</b>\n"
-        f"📊 <b>Ativo:</b> {ativo}\n"
-        f"🎯 <b>Direção:</b> {direcao}\n"
-        f"🧠 <b>Confiança:</b> {conf}%\n"
-        f"⏱️ <b>Timeframe:</b> M5\n"
-        f"🚀 <b>Entrada:</b> AGORA"
-    )
-
-    threading.Timer(300, avaliar_resultado, args=[ativo,direcao]).start()
-
-def avaliar_resultado(ativo,direcao):
-    global sinal_ativo
-    cursor.execute("""
-        SELECT close,open FROM velas
-        WHERE ativo=? ORDER BY epoch DESC LIMIT 1
-    """,(ativo,))
-    c,o = cursor.fetchone()
-    real = "CALL" if c>o else "PUT"
-    res = "GREEN" if real==direcao else "RED"
-
-    cursor.execute("""
-        UPDATE sinais SET resultado=?
-        WHERE resultado='PENDENTE'
-    """,(res,))
-    conn.commit()
-
-    tg(f"🧾 RESULTADO: <b>{res}</b> — {ativo}")
-    sinal_ativo = False
+    if confianca >= 70:
+        return tendencia, confianca
+    return None
 
 # ===============================
-# WEBSOCKET DERIV
+# LOOP
 # ===============================
-def on_message(ws,msg):
-    data = json.loads(msg)
-    if "ohlc" in data:
-        c = data["ohlc"]
-        cursor.execute("""
-            INSERT INTO velas VALUES (?,?,?,?,?,?)
-        """,(c["symbol"],c["open"],c["high"],c["low"],c["close"],c["epoch"]))
-        conn.commit()
-        analisar_ativo(c["symbol"])
+sinais_30m = []
 
-def on_open(ws):
-    ws.send(json.dumps({"authorize":DERIV_API_KEY}))
-    time.sleep(1)
-    for a in ATIVOS:
-        ws.send(json.dumps({
-            "ticks_history":a,
-            "style":"candles",
-            "granularity":TIMEFRAME,
-            "count":120,
-            "end":"latest"
-        }))
+tg("🤖 TROIA v23 ONLINE — MERCADO REAL 5M")
 
-def iniciar_ws():
-    websocket.WebSocketApp(
-        "wss://ws.derivws.com/websockets/v3?app_id=1089",
-        on_open=on_open,
-        on_message=on_message
-    ).run_forever()
+while True:
+    now = time.time()
+    sinais_30m = [t for t in sinais_30m if now - t < INTERVALO_CONTROLE]
 
-# ===============================
-# PAINEL WEB
-# ===============================
-app = Flask(__name__)
+    if len(sinais_30m) >= MAX_SINAIS_30M:
+        time.sleep(30)
+        continue
 
-@app.route("/")
-def painel():
-    cursor.execute("SELECT COUNT(*) FROM sinais WHERE resultado='GREEN'")
-    g = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM sinais WHERE resultado='RED'")
-    r = cursor.fetchone()[0]
-    total = g+r
-    win = (g/total*100) if total>0 else 0
+    for ativo in ATIVOS:
+        try:
+            r = analisar(ativo)
+            if r:
+                direcao, conf = r
+                sinais_30m.append(time.time())
+                horario = (datetime.now(timezone.utc)+timedelta(minutes=5)).strftime("%H:%M UTC")
 
-    return f"""
-    <h2>🚀 TROIA v21 — FASE 4</h2>
-    <p>Greens: {g}</p>
-    <p>Reds: {r}</p>
-    <p>Winrate: {win:.2f}%</p>
-    """
-
-# ===============================
-# START
-# ===============================
-tg("🚀 Troia v21 Fase 4 ONLINE | IA de decisão ativa")
-
-threading.Thread(target=iniciar_ws, daemon=True).start()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+                tg(
+                    f"🔥 <b>SINAL TROIA v23</b>\n"
+                    f"📊 {ativo}\n"
+                    f"🎯 {direcao}\n"
+                    f"⏱ 5M\n"
+                    f"🚀 Entrada: {horario}\n"
+                    f"📈 Confiança: {conf}%"
+                )
+                time.sleep(10)
+        except:
+            time.sleep(2)
