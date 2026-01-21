@@ -1,5 +1,6 @@
 import websocket, json, time, requests
 from datetime import datetime, timezone, timedelta
+import threading
 
 # ===============================
 # CONFIGURAÇÃO
@@ -15,6 +16,7 @@ WAIT_BUFFER = 10  # segundos extras após fechamento da vela
 RECONNECT_DELAY = 3
 
 sinais_30min = []
+sinal_em_analise = threading.Lock()
 
 # ===============================
 # LISTA COMPLETA DE ATIVOS
@@ -111,36 +113,6 @@ def pegar_candles(ativo, count=20):
             time.sleep(RECONNECT_DELAY)
 
 # ===============================
-# ANALISA 1 ATIVO
-# ===============================
-def analisar_ativo(ativo):
-    global sinais_30min
-    agora = datetime.now(timezone.utc)
-    # Limita sinais em 30 minutos
-    sinais_30min = [s for s in sinais_30min if (agora - s).total_seconds() < 1800]
-    if len(sinais_30min) >= SINAIS_MAX_30MIN:
-        return None
-
-    candles = pegar_candles(ativo)
-    direcao = direcao_candle(candles[-1])
-    conf = calcular_confianca(candles)
-    horario_entrada = proxima_vela_horario()
-    motivo = "Price Action + Suportes/Resistências + Tendência detectada"
-
-    if conf >= CONF_MIN:
-        enviar_sinal(
-            ativo,
-            direcao,
-            conf,
-            "Price Action + Suportes/Resistências",
-            entrada=f"Próxima vela ({horario_entrada})",
-            motivo=motivo
-        )
-        sinais_30min.append(agora)
-        return {"ativo": ativo, "direcao": direcao, "horario_entrada": horario_entrada, "tempo_espera": TIMEFRAME + WAIT_BUFFER}
-    return None
-
-# ===============================
 # RESULTADO REAL
 # ===============================
 def resultado_real(res):
@@ -161,7 +133,48 @@ def resultado_real(res):
         entrada=f"{res['horario_entrada']} (concluído)",
         resultado=resultado
     )
+    sinal_em_analise.release()  # libera análise do próximo ativo
     return resultado
+
+# ===============================
+# ANALISA 1 ATIVO
+# ===============================
+def analisar_ativo(ativo):
+    global sinais_30min
+
+    agora = datetime.now(timezone.utc)
+    # Limita sinais em 30 minutos
+    sinais_30min = [s for s in sinais_30min if (agora - s).total_seconds() < 1800]
+    if len(sinais_30min) >= SINAIS_MAX_30MIN:
+        return None
+
+    candles = pegar_candles(ativo)
+    direcao = direcao_candle(candles[-1])
+    conf = calcular_confianca(candles)
+    horario_entrada = proxima_vela_horario()
+    motivo = "Price Action + Suportes/Resistências + Tendência detectada"
+
+    if conf >= CONF_MIN:
+        # Bloqueia análise de outros ativos enquanto o sinal estiver em andamento
+        sinal_em_analise.acquire()
+        enviar_sinal(
+            ativo,
+            direcao,
+            conf,
+            "Price Action + Suportes/Resistências",
+            entrada=f"Próxima vela ({horario_entrada})",
+            motivo=motivo
+        )
+        sinais_30min.append(agora)
+        # Thread para esperar o fechamento da vela sem travar o loop
+        threading.Thread(target=resultado_real, args=({
+            "ativo": ativo,
+            "direcao": direcao,
+            "horario_entrada": horario_entrada,
+            "tempo_espera": TIMEFRAME + WAIT_BUFFER
+        },)).start()
+        return True
+    return None
 
 # ===============================
 # LOOP PRINCIPAL
@@ -171,11 +184,10 @@ def loop_ativos():
     while True:
         for ativo in ATIVOS:
             try:
-                res = analisar_ativo(ativo)
-                if res:
-                    resultado_real(res)  # espera o resultado antes de analisar o próximo ativo
+                analisar_ativo(ativo)
             except Exception as e:
                 enviar_sinal("Erro", "N/A", 0, f"Erro no ativo {ativo}: {e}")
+            time.sleep(1)  # evita sobrecarga do loop
 
 # ===============================
 # START
