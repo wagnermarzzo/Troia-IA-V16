@@ -11,10 +11,11 @@ TELEGRAM_CHAT_ID = "-1003656750711"
 
 TIMEFRAME = 300  # 5 minutos
 CONF_MIN = 55
-PROB_MIN = 70  # probabilidade mínima para enviar sinal
+PROB_MIN = 70  # probabilidade mínima real para envio de sinal
 WAIT_BUFFER = 10  # segundos extras
-RECONNECT_DELAY = 3
+RECONNECT_DELAY = 5
 LOG_FILE = "sinais_log.csv"
+ERROR_LOG = "error_log.txt"
 sinal_em_analise = threading.Lock()
 
 # ===============================
@@ -39,31 +40,39 @@ ATIVOS_OTC = [
 ATIVOS = ATIVOS_FOREX + ATIVOS_OTC
 
 # ===============================
+# FUNÇÃO DE LOG DE ERROS
+# ===============================
+def log_error(mensagem):
+    with open(ERROR_LOG, "a") as f:
+        f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {mensagem}\n")
+    print(mensagem)
+
+# ===============================
 # TELEGRAM
 # ===============================
 def enviar_sinal(ativo, direcao, confianca, estrategia, entrada="Próxima vela", resultado=None):
-    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    nome_bot = "SENTINEL IA – SINAL ENCONTRADO"
-
-    msg = f"💥 <b>{nome_bot}</b>\n" \
-          f"📊 <b>Ativo:</b> {ativo}\n" \
-          f"🎯 <b>Direção:</b> {direcao}\n" \
-          f"🧠 <b>Estratégia:</b> {estrategia}\n" \
-          f"⏱️ <b>Entrada:</b> {entrada}\n" \
-          f"🧮 <b>Confiança:</b> {confianca}%\n"
-
-    if resultado:
-        cor = "🟢 Green" if resultado == "Green" else "🔴 Red"
-        msg += f"✅ <b>Resultado:</b> {cor}"
-
     try:
+        now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        nome_bot = "SENTINEL IA – SINAL ENCONTRADO"
+
+        msg = f"💥 <b>{nome_bot}</b>\n" \
+              f"📊 <b>Ativo:</b> {ativo}\n" \
+              f"🎯 <b>Direção:</b> {direcao}\n" \
+              f"🧠 <b>Estratégia:</b> {estrategia}\n" \
+              f"⏱️ <b>Entrada:</b> {entrada}\n" \
+              f"🧮 <b>Confiança:</b> {confianca}%\n"
+
+        if resultado:
+            cor = "🟢 Green" if resultado == "Green" else "🔴 Red"
+            msg += f"✅ <b>Resultado:</b> {cor}"
+
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
             timeout=5
         )
     except Exception as e:
-        print("Erro ao enviar Telegram:", e)
+        log_error(f"Erro ao enviar Telegram: {e}")
 
 # ===============================
 # FUNÇÕES DE ANÁLISE
@@ -75,9 +84,9 @@ def calcular_confianca(candles):
     call = sum(1 for c in candles if c["close"] > c["open"])
     put = sum(1 for c in candles if c["close"] < c["open"])
     total = len(candles)
-    maior = max(call, put)
-    confianca = int(maior / total * 100) if total > 0 else 0
-    return confianca
+    if total == 0:
+        return 0
+    return int(max(call, put) / total * 100)
 
 def direcao_confirmada(candles, n=3):
     ultimos = candles[-n:]
@@ -104,24 +113,15 @@ def candle_valido(candle, min_pct=0.0003):
 def suporte_resistencia(candles, periodo=50):
     highs = [c["high"] for c in candles[-periodo:]]
     lows = [c["low"] for c in candles[-periodo:]]
-    resistencia = max(highs)
-    suporte = min(lows)
-    return suporte, resistencia
+    return min(lows), max(highs)
 
-# ===============================
-# PROBABILIDADE REAL
-# ===============================
 def probabilidade_real(candles, direcao):
-    """Calcula chance real de Green baseado no histórico completo do ativo."""
     total = len(candles)
     if total == 0:
         return 0
     verdes = sum(1 for c in candles if direcao_candle(c) == direcao)
     return int(verdes / total * 100)
 
-# ===============================
-# PRÓXIMA VELA
-# ===============================
 def proxima_vela_horario():
     now = datetime.now(timezone.utc)
     next_time = now + timedelta(seconds=TIMEFRAME - now.timestamp() % TIMEFRAME)
@@ -131,10 +131,12 @@ def proxima_vela_horario():
 # PEGAR CANDLES COM RETRY
 # ===============================
 def pegar_candles(ativo, count=50):
-    tentativas = 0
-    while tentativas < 5:
+    while True:
         try:
-            ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=10)
+            ws = websocket.create_connection(
+                "wss://ws.derivws.com/websockets/v3?app_id=1089",
+                timeout=10
+            )
             ws.send(json.dumps({"authorize": DERIV_API_KEY}))
             end_timestamp = int(time.time())
             ws.send(json.dumps({
@@ -148,10 +150,9 @@ def pegar_candles(ativo, count=50):
             ws.close()
             if "candles" in data:
                 return data["candles"][-count:]
-        except Exception:
-            tentativas += 1
+        except Exception as e:
+            log_error(f"Falha ao pegar candles de {ativo}, retry em {RECONNECT_DELAY}s: {e}")
             time.sleep(RECONNECT_DELAY)
-    return []
 
 # ===============================
 # LOG DE SINAIS
@@ -191,7 +192,7 @@ def resultado_real(res):
             sinal_em_analise.release()
 
 # ===============================
-# LOOP PRINCIPAL FINAL COM RANKING DE PROBABILIDADE
+# LOOP PRINCIPAL FINAL
 # ===============================
 def loop_ativos_final():
     enviar_sinal("N/A", "N/A", 0, "Iniciando Bot Sentinel IA – Painel Profissional")
@@ -226,10 +227,9 @@ def loop_ativos_final():
             if confianca < min_conf:
                 continue
 
-            # Calcula probabilidade real baseada no histórico
             prob_real = probabilidade_real(candles, direcao)
             if prob_real < PROB_MIN:
-                continue  # só envia sinais fortes
+                continue
 
             if ultimo_sinal[ativo] == direcao:
                 continue
@@ -259,7 +259,12 @@ def loop_ativos_final():
         time.sleep(0.1)
 
 # ===============================
-# START
+# START COM PROTEÇÃO GLOBAL
 # ===============================
 if __name__ == "__main__":
-    loop_ativos_final()
+    while True:
+        try:
+            loop_ativos_final()
+        except Exception as e:
+            log_error(f"[FATAL] Loop principal travou, reiniciando em {RECONNECT_DELAY}s: {e}")
+            time.sleep(RECONNECT_DELAY)
