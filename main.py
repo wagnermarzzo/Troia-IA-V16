@@ -87,8 +87,7 @@ def calcular_confianca(candles):
 # ===============================
 def proxima_vela_horario():
     now = datetime.now(timezone.utc)
-    remainder = TIMEFRAME - (now.minute*60 + now.second) % TIMEFRAME
-    next_time = now + timedelta(seconds=remainder)
+    next_time = now + timedelta(seconds=TIMEFRAME - now.timestamp() % TIMEFRAME)
     return next_time.strftime("%H:%M:%S UTC")
 
 # ===============================
@@ -151,7 +150,8 @@ def resultado_real(res):
         )
         log_sinal(res["ativo"], res["direcao"], res["confianca"], resultado)
     finally:
-        sinal_em_analise.release()
+        if sinal_em_analise.locked():
+            sinal_em_analise.release()
 
 # ===============================
 # ANALISA 1 ATIVO POR VEZ
@@ -169,7 +169,7 @@ def analisar_ativo(ativo):
     if ativo in ATIVOS_OTC:
         motivo += " ⚠ OTC: baixa liquidez"
 
-    if confianca >= CONF_MIN:
+    if confianca >= CONF_MIN and not sinal_em_analise.locked():
         sinal_em_analise.acquire()
         enviar_sinal(
             ativo,
@@ -180,6 +180,7 @@ def analisar_ativo(ativo):
             motivo=motivo
         )
         log_sinal(ativo, direcao, confianca, None)
+
         threading.Thread(target=resultado_real, args=({
             "ativo": ativo,
             "direcao": direcao,
@@ -191,16 +192,20 @@ def analisar_ativo(ativo):
     return None
 
 # ===============================
-# LOOP PRINCIPAL
+# LOOP PRINCIPAL OTIMIZADO
 # ===============================
 def loop_ativos():
     enviar_sinal("N/A", "N/A", 0, "Iniciando Bot Sentinel IA – Painel Profissional")
     while True:
+        sinal_enviado = False
         for ativo in ATIVOS:
             if not sinal_em_analise.locked():
-                analisar_ativo(ativo)
-                break  # só analisar 1 ativo por vez
-        time.sleep(1)
+                enviado = analisar_ativo(ativo)
+                if enviado:
+                    sinal_enviado = True
+                    break  # só 1 sinal por vez
+        # pausa curta para não sobrecarregar CPU
+        time.sleep(0.1 if not sinal_enviado else 1)
 
 # ===============================
 # START
