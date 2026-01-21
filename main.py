@@ -11,6 +11,7 @@ TELEGRAM_CHAT_ID = "-1003656750711"
 
 TIMEFRAME = 300  # 5 minutos
 CONF_MIN = 55
+PROB_MIN = 70  # probabilidade mínima para enviar sinal
 WAIT_BUFFER = 10  # segundos extras
 RECONNECT_DELAY = 3
 LOG_FILE = "sinais_log.csv"
@@ -65,13 +66,12 @@ def enviar_sinal(ativo, direcao, confianca, estrategia, entrada="Próxima vela",
         print("Erro ao enviar Telegram:", e)
 
 # ===============================
-# DIREÇÃO E CONFIANÇA
+# FUNÇÕES DE ANÁLISE
 # ===============================
 def direcao_candle(candle):
     return "CALL" if candle["close"] > candle["open"] else "PUT"
 
 def calcular_confianca(candles):
-    """Calcula confiança real baseada em histórico de 20 candles."""
     call = sum(1 for c in candles if c["close"] > c["open"])
     put = sum(1 for c in candles if c["close"] < c["open"])
     total = len(candles)
@@ -79,9 +79,6 @@ def calcular_confianca(candles):
     confianca = int(maior / total * 100) if total > 0 else 0
     return confianca
 
-# ===============================
-# CONFIRMAÇÃO DE CANDLES
-# ===============================
 def direcao_confirmada(candles, n=3):
     ultimos = candles[-n:]
     calls = sum(1 for c in ultimos if c["close"] > c["open"])
@@ -93,9 +90,6 @@ def direcao_confirmada(candles, n=3):
     else:
         return None
 
-# ===============================
-# TENDÊNCIA DE MÉDIO PRAZO
-# ===============================
 def tendencia_medio_prazo(candles, periodo=20):
     if len(candles) < periodo:
         periodo = len(candles)
@@ -103,22 +97,27 @@ def tendencia_medio_prazo(candles, periodo=20):
     fechamento_fim = candles[-1]["close"]
     return "CALL" if fechamento_fim > fechamento_inicio else "PUT"
 
-# ===============================
-# FILTRO DE VOLATILIDADE
-# ===============================
 def candle_valido(candle, min_pct=0.0003):
     diff = abs(candle["close"] - candle["open"])
     return diff / candle["open"] >= min_pct
 
-# ===============================
-# SUPORTE/RESISTÊNCIA SIMPLES
-# ===============================
 def suporte_resistencia(candles, periodo=50):
     highs = [c["high"] for c in candles[-periodo:]]
     lows = [c["low"] for c in candles[-periodo:]]
     resistencia = max(highs)
     suporte = min(lows)
     return suporte, resistencia
+
+# ===============================
+# PROBABILIDADE REAL
+# ===============================
+def probabilidade_real(candles, direcao):
+    """Calcula chance real de Green baseado no histórico completo do ativo."""
+    total = len(candles)
+    if total == 0:
+        return 0
+    verdes = sum(1 for c in candles if direcao_candle(c) == direcao)
+    return int(verdes / total * 100)
 
 # ===============================
 # PRÓXIMA VELA
@@ -192,9 +191,9 @@ def resultado_real(res):
             sinal_em_analise.release()
 
 # ===============================
-# LOOP PRINCIPAL AVANÇADO COM PROBABILIDADE
+# LOOP PRINCIPAL FINAL COM RANKING DE PROBABILIDADE
 # ===============================
-def loop_ativos_probabilidade():
+def loop_ativos_final():
     enviar_sinal("N/A", "N/A", 0, "Iniciando Bot Sentinel IA – Painel Profissional")
     cooldowns = {ativo: 0 for ativo in ATIVOS}
     ultimo_sinal = {ativo: None for ativo in ATIVOS}
@@ -209,7 +208,6 @@ def loop_ativos_probabilidade():
             if not candles:
                 continue
 
-            # FILTROS AVANÇADOS
             direcao = direcao_confirmada(candles, n=3)
             if not direcao:
                 continue
@@ -228,11 +226,13 @@ def loop_ativos_probabilidade():
             if confianca < min_conf:
                 continue
 
+            # Calcula probabilidade real baseada no histórico
+            prob_real = probabilidade_real(candles, direcao)
+            if prob_real < PROB_MIN:
+                continue  # só envia sinais fortes
+
             if ultimo_sinal[ativo] == direcao:
                 continue
-
-            # SUPORTE/RESISTÊNCIA (para cálculo interno, sem enviar)
-            suporte, resistencia = suporte_resistencia(candles)
 
             if sinal_em_analise.acquire(blocking=False):
                 horario_entrada = proxima_vela_horario()
@@ -262,4 +262,4 @@ def loop_ativos_probabilidade():
 # START
 # ===============================
 if __name__ == "__main__":
-    loop_ativos_probabilidade()
+    loop_ativos_final()
