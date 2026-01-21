@@ -6,16 +6,20 @@ import threading
 # CONFIGURAÇÃO
 # ===============================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
-TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
+TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ITHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 TIMEFRAME = 300  # 5 minutos
-CONF_MIN = 55
 WAIT_BUFFER = 10
 RECONNECT_MAX = 5
 RECONNECT_DELAY = 3
 
+CONF_DEFAULT = 55
+CONF_MIN = 50
+CONF_MAX = 70
+
 LOG_FILE = "sinais_log.csv"
+HISTORICO_RESULTADOS = []  # para ajustar confiança dinamicamente
 
 # ===============================
 # LISTA COMPLETA DE ATIVOS (FOREX + OTC)
@@ -39,33 +43,47 @@ ATIVOS_OTC = [
 ATIVOS = ATIVOS_FOREX + ATIVOS_OTC
 
 # ===============================
+# LOCK GLOBAL
+# ===============================
+sinal_em_analise = threading.Lock()
+
+# ===============================
 # TELEGRAM
 # ===============================
-def enviar_sinal(ativo, direcao, confianca, estrategia, entrada="Próxima vela", motivo=None, resultado=None):
-    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+def enviar_ou_editar_sinal(message_id=None, ativo=None, direcao=None, confianca=0,
+                           estrategia=None, entrada="Agora", motivo=None, resultado=None, horario_fechamento=None):
     nome_bot = "SENTINEL IA – SINAL ENCONTRADO"
-
     msg = f"💥 <b>{nome_bot}</b>\n" \
           f"📊 <b>Ativo:</b> {ativo}\n" \
           f"🎯 <b>Direção:</b> {direcao}\n" \
           f"🧠 <b>Estratégia:</b> {estrategia}\n" \
-          f"⏱️ <b>Entrada:</b> {entrada}\n"
-
+          f"⏱️ <b>Entrada:</b> {entrada}\n" \
+          f"🧮 <b>Confiança:</b> {confianca}%\n"
     if motivo:
         msg += f"📋 <b>Motivo:</b> {motivo}\n"
-
     if resultado:
         cor = "🟢 Green" if resultado == "Green" else "🔴 Red"
+        if horario_fechamento:
+            msg += f"⏱️ <b>Fechamento da vela:</b> {horario_fechamento}\n"
         msg += f"✅ <b>Resultado:</b> {cor}"
 
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode":"HTML"},
-            timeout=5
-        )
+        if message_id:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
+                data={"chat_id": TELEGRAM_CHAT_ID, "message_id": message_id, "text": msg, "parse_mode": "HTML"},
+                timeout=5
+            )
+        else:
+            r = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+                timeout=5
+            )
+            return r.json().get("result", {}).get("message_id")
     except Exception as e:
-        print("Erro ao enviar Telegram:", e)
+        print("Erro Telegram:", e)
+        return None
 
 # ===============================
 # DIREÇÃO E CONFIANÇA
@@ -78,19 +96,22 @@ def calcular_confianca(candles):
     put = sum(1 for c in candles if c["close"] < c["open"])
     total = len(candles)
     maior = max(call, put)
-    confianca = int(maior / total * 100) if total > 0 else 0
-    return confianca
+    return int(maior / total * 100) if total > 0 else 0
+
+def atualizar_conf_dinamica():
+    if len(HISTORICO_RESULTADOS) < 5:
+        return CONF_DEFAULT
+    greens = HISTORICO_RESULTADOS.count("Green")
+    taxa_acerto = greens / len(HISTORICO_RESULTADOS)
+    if taxa_acerto > 0.7:
+        return min(CONF_MAX, CONF_DEFAULT + 5)
+    elif taxa_acerto < 0.4:
+        return max(CONF_MIN, CONF_DEFAULT - 5)
+    else:
+        return CONF_DEFAULT
 
 # ===============================
-# PRÓXIMA VELA
-# ===============================
-def proxima_vela_horario():
-    now = datetime.now(timezone.utc)
-    next_minute = (now + timedelta(seconds=TIMEFRAME)).replace(second=0, microsecond=0)
-    return next_minute.strftime("%H:%M:%S UTC")
-
-# ===============================
-# PEGAR CANDLES COM RETRY EXPONENCIAL
+# PEGAR CANDLES COM RETRY
 # ===============================
 def pegar_candles(ativo, count=20):
     for tentativa in range(1, RECONNECT_MAX + 1):
@@ -111,7 +132,7 @@ def pegar_candles(ativo, count=20):
                 return data["candles"][-count:]
         except Exception as e:
             print(f"Tentativa {tentativa} falhou para {ativo}: {e}")
-            time.sleep(RECONNECT_DELAY * tentativa)  # retry exponencial
+            time.sleep(RECONNECT_DELAY * tentativa)
     return []
 
 # ===============================
@@ -128,85 +149,88 @@ def log_sinal(ativo, direcao, confianca, resultado):
 # ===============================
 # RESULTADO REAL
 # ===============================
-def resultado_real(ativo, direcao, horario_entrada):
+def resultado_real(ativo, direcao, message_id):
     try:
-        # espera o fechamento da vela + buffer
         time.sleep(TIMEFRAME + WAIT_BUFFER)
         candles = pegar_candles(ativo, count=1)
         if not candles:
             resultado = "Erro"
+            horario_fechamento = None
         else:
-            direcao_real = direcao_candle(candles[-1])
+            candle_fechamento = candles[-1]
+            direcao_real = direcao_candle(candle_fechamento)
             resultado = "Green" if direcao_real == direcao else "Red"
-
-        enviar_sinal(
-            ativo,
-            direcao,
-            0,
-            "Price Action + Suportes/Resistências",
-            entrada=f"{horario_entrada} (concluído)",
-            resultado=resultado
+            horario_fechamento = datetime.fromtimestamp(candle_fechamento["epoch"], tz=timezone.utc).strftime("%H:%M:%S UTC")
+        
+        # Atualiza histórico e confiança dinâmica
+        if resultado in ["Green", "Red"]:
+            HISTORICO_RESULTADOS.append(resultado)
+            if len(HISTORICO_RESULTADOS) > 20:
+                HISTORICO_RESULTADOS.pop(0)
+        
+        enviar_ou_editar_sinal(
+            message_id=message_id,
+            ativo=ativo,
+            direcao=direcao,
+            resultado=resultado,
+            horario_fechamento=horario_fechamento
         )
         log_sinal(ativo, direcao, 0, resultado)
     finally:
-        # libera o lock para analisar o próximo ativo
         sinal_em_analise.release()
 
 # ===============================
 # ANALISA 1 ATIVO
 # ===============================
 def analisar_ativo(ativo):
-    agora = datetime.now(timezone.utc)
     candles = pegar_candles(ativo)
     if not candles:
         print(f"Não foi possível pegar candles para {ativo}. Pulando...")
         return False
 
     direcao = direcao_candle(candles[-1])
-    conf = calcular_confianca(candles)
-    horario_entrada = proxima_vela_horario()
-
-    # Alerta se OTC
+    conf_atual = calcular_confianca(candles)
+    conf_min = atualizar_conf_dinamica()
+    horario_entrada = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    
     motivo = "Price Action + Suportes/Resistências + Tendência detectada"
     if ativo in ATIVOS_OTC:
         motivo += " ⚠ OTC: baixa liquidez"
 
-    if conf >= CONF_MIN:
-        sinal_em_analise.acquire()  # trava para não analisar outro ativo
-        enviar_sinal(
-            ativo,
-            direcao,
-            conf,
-            "Price Action + Suportes/Resistências",
-            entrada=f"Próxima vela ({horario_entrada})",
+    if conf_atual >= conf_min:
+        sinal_em_analise.acquire()
+        msg_id = enviar_ou_editar_sinal(
+            ativo=ativo,
+            direcao=direcao,
+            confianca=conf_atual,
+            estrategia="Price Action + Suportes/Resistências",
+            entrada=horario_entrada,
             motivo=motivo
         )
-        log_sinal(ativo, direcao, conf, None)
-        threading.Thread(target=resultado_real, args=(ativo, direcao, horario_entrada)).start()
+        log_sinal(ativo, direcao, conf_atual, None)
+        threading.Thread(target=resultado_real, args=(ativo, direcao, msg_id)).start()
         return True
     return False
 
 # ===============================
-# LOOP PRINCIPAL (1 ATIVO POR VEZ)
+# LOOP PRINCIPAL
 # ===============================
 def loop_ativos():
-    enviar_sinal("N/A","N/A",0,"Iniciando Bot Sentinel IA – Painel Profissional")
+    enviar_ou_editar_sinal(
+        ativo="N/A",
+        direcao="N/A",
+        confianca=0,
+        estrategia="Iniciando Bot Sentinel IA – Painel Profissional"
+    )
     while True:
         for ativo in ATIVOS:
-            # aguarda resultado do ativo anterior
             sinal_em_analise.acquire()
-            sinal_em_analise.release()  # libera imediatamente para checagem
+            sinal_em_analise.release()
             sucesso = analisar_ativo(ativo)
             if sucesso:
-                # espera até o resultado real ser enviado antes de continuar
                 sinal_em_analise.acquire()
                 sinal_em_analise.release()
-            time.sleep(1)  # evita loop muito rápido
-
-# ===============================
-# LOCK GLOBAL
-# ===============================
-sinal_em_analise = threading.Lock()
+            time.sleep(1)
 
 # ===============================
 # START
