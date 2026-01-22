@@ -1,5 +1,6 @@
-import json, time, requests, threading, websocket, os
-from datetime import datetime, timezone, timedelta
+import json, time, requests, threading, websocket
+from collections import deque
+from datetime import datetime
 
 # ===============================
 # CONFIGURAÇÃO
@@ -9,34 +10,43 @@ TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 TIMEFRAME = 300
-CONF_MIN = 52
-PROB_MIN = 60
 WAIT_BUFFER = 10
-RECONNECT_DELAY = 5
-
 DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 
 sinal_em_analise = threading.Event()
 
 # ===============================
+# MODOS
+# ===============================
+MODO = "MODERADO"
+
+MODOS = {
+    "AGRESSIVO":  {"CONF_MIN":48,"PROB_MIN":52,"CONFIRM":1,"TEND":8,"MINPCT":0.0001},
+    "MODERADO":   {"CONF_MIN":50,"PROB_MIN":55,"CONFIRM":2,"TEND":12,"MINPCT":0.00015},
+    "CONSERVADOR":{"CONF_MIN":55,"PROB_MIN":60,"CONFIRM":3,"TEND":20,"MINPCT":0.00025}
+}
+
+CFG = MODOS[MODO]
+
+# ===============================
 # ATIVOS
 # ===============================
-ATIVOS_FOREX = [
-    "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD","frxUSDCAD","frxUSDCHF",
-    "frxNZDUSD","frxEURGBP","frxEURJPY","frxEURCHF","frxEURAUD","frxEURCAD",
-    "frxEURNZD","frxGBPJPY","frxGBPCHF","frxGBPAUD","frxGBPCAD","frxGBPNZD"
+ATIVOS = [
+    "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD","frxUSDCAD",
+    "frxUSDCHF","frxNZDUSD","frxEURGBP","frxEURJPY","frxGBPJPY",
+    "frxUSDTRY","frxUSDZAR","frxUSDMXN"
 ]
 
-ATIVOS_OTC = [
-    "frxUSDTRY","frxUSDRUB","frxUSDZAR","frxUSDMXN","frxUSDHKD"
-]
-
-ATIVOS = ATIVOS_FOREX + ATIVOS_OTC
+# ===============================
+# ESTATÍSTICAS
+# ===============================
+stats = {"total":0,"green":0,"red":0}
+historico_resultados = deque(maxlen=5)
 
 # ===============================
 # TELEGRAM
 # ===============================
-def enviar_sinal(msg):
+def tg(msg):
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -47,38 +57,64 @@ def enviar_sinal(msg):
         pass
 
 # ===============================
-# ANÁLISES (MANTIDAS)
+# IA ADAPTATIVA
 # ===============================
-def direcao_candle(c):
-    return "CALL" if c["close"] > c["open"] else "PUT"
+def ia_adaptativa():
+    global MODO, CFG
 
-def direcao_confirmada(candles, n=2):
-    ult = candles[-n:]
-    if all(c["close"] > c["open"] for c in ult): return "CALL"
-    if all(c["close"] < c["open"] for c in ult): return "PUT"
+    if len(historico_resultados) < 5:
+        return
+
+    g = historico_resultados.count("G")
+    r = historico_resultados.count("R")
+
+    novo = "MODERADO"
+    if r >= 4:
+        novo = "CONSERVADOR"
+    elif g >= 4:
+        novo = "AGRESSIVO"
+
+    if novo != MODO:
+        MODO = novo
+        CFG = MODOS[MODO]
+        tg(
+            f"🧠 <b>IA ADAPTATIVA</b>\n"
+            f"Modo ajustado para: <b>{MODO}</b>\n"
+            f"Últimos 5: {''.join(historico_resultados)}"
+        )
+
+# ===============================
+# ANÁLISES
+# ===============================
+def direcao(c): return "CALL" if c["close"] > c["open"] else "PUT"
+
+def direcao_confirmada(c):
+    ult = c[-CFG["CONFIRM"]:]
+    if all(direcao(x) == "CALL" for x in ult): return "CALL"
+    if all(direcao(x) == "PUT" for x in ult): return "PUT"
     return None
 
-def calcular_confianca(candles):
+def confianca(c):
     return int(max(
-        sum(1 for c in candles if c["close"] > c["open"]),
-        sum(1 for c in candles if c["close"] < c["open"])
-    ) / len(candles) * 100)
+        sum(1 for x in c if direcao(x) == "CALL"),
+        sum(1 for x in c if direcao(x) == "PUT")
+    ) / len(c) * 100)
 
-def tendencia_medio_prazo(candles, p=20):
-    return "CALL" if candles[-1]["close"] > candles[-p]["close"] else "PUT"
+def tendencia(c):
+    return "CALL" if c[-1]["close"] > c[-CFG["TEND"]]["close"] else "PUT"
 
-def candle_valido(c, min_pct=0.0003):
-    return abs(c["close"] - c["open"]) / c["open"] >= min_pct
+def candle_ok(c):
+    return abs(c["close"] - c["open"]) / c["open"] >= CFG["MINPCT"]
 
-def probabilidade_real(candles, d):
-    return int(sum(1 for c in candles if direcao_candle(c) == d) / len(candles) * 100)
+def prob(c, d):
+    return int(sum(1 for x in c if direcao(x) == d) / len(c) * 100)
 
 # ===============================
-# DERIV WS (SEGURO)
+# DERIV
 # ===============================
-def pegar_candles_ws(ativo, count=50):
+def candles_ws(ativo, count=50):
     try:
-        ws = websocket.create_connection(DERIV_WS_URL, timeout=8)
+        ws = websocket.create_connection(DERIV_WS_URL, timeout=6)
         ws.send(json.dumps({
             "ticks_history": ativo,
             "style": "candles",
@@ -94,25 +130,38 @@ def pegar_candles_ws(ativo, count=50):
 # ===============================
 # RESULTADO
 # ===============================
-def aguardar_resultado(res):
+def resultado(res):
     time.sleep(res["tempo"])
-    candles = pegar_candles_ws(res["ativo"], 1)
-    resultado = "🟢 GREEN" if candles and direcao_candle(candles[-1]) == res["dir"] else "🔴 RED"
+    c = candles_ws(res["ativo"], 1)
+    win = c and direcao(c[-1]) == res["dir"]
 
-    enviar_sinal(
+    stats["total"] += 1
+    if win:
+        stats["green"] += 1
+        historico_resultados.append("G")
+    else:
+        stats["red"] += 1
+        historico_resultados.append("R")
+
+    ia_adaptativa()
+
+    acc = int(stats["green"] / stats["total"] * 100)
+
+    tg(
         f"📊 <b>RESULTADO</b>\n"
-        f"Ativo: {res['ativo']}\n"
-        f"Direção: {res['dir']}\n"
-        f"{resultado}"
+        f"{'🟢 GREEN' if win else '🔴 RED'}\n\n"
+        f"🎯 Assertividade: {acc}%\n"
+        f"📈 Total: {stats['total']}\n"
+        f"Modo atual: {MODO}"
     )
+
     sinal_em_analise.clear()
 
 # ===============================
 # LOOP PRINCIPAL
 # ===============================
-def loop_principal():
-    enviar_sinal("🚀 <b>Sentinel IA iniciado</b>")
-
+def loop():
+    tg("🚀 <b>BOT INICIADO</b>\nIA Adaptativa ATIVA")
     ultimo = {}
 
     while True:
@@ -120,38 +169,40 @@ def loop_principal():
             if sinal_em_analise.is_set():
                 break
 
-            candles = pegar_candles_ws(ativo)
-            if len(candles) < 30:
+            c = candles_ws(ativo)
+            if len(c) < 30:
                 continue
 
-            direcao = direcao_confirmada(candles)
-            if not direcao or not candle_valido(candles[-1]):
+            d = direcao_confirmada(c)
+            if not d or not candle_ok(c[-1]):
                 continue
 
-            confianca = calcular_confianca(candles[-20:])
-            if direcao != tendencia_medio_prazo(candles):
+            if d != tendencia(c):
                 continue
 
-            if confianca < CONF_MIN or probabilidade_real(candles, direcao) < PROB_MIN:
+            if confianca(c[-20:]) < CFG["CONF_MIN"]:
                 continue
 
-            if ultimo.get(ativo) == direcao:
+            if prob(c, d) < CFG["PROB_MIN"]:
                 continue
 
+            if ultimo.get(ativo) == d:
+                continue
+
+            ultimo[ativo] = d
             sinal_em_analise.set()
-            ultimo[ativo] = direcao
 
-            enviar_sinal(
+            tg(
                 f"💥 <b>SINAL</b>\n"
                 f"Ativo: {ativo}\n"
-                f"Direção: {direcao}\n"
-                f"Confiança: {confianca}%\n"
+                f"Direção: {d}\n"
+                f"Modo: {MODO}\n"
                 f"Entrada: Próxima vela"
             )
 
             threading.Thread(
-                target=aguardar_resultado,
-                args=({"ativo": ativo, "dir": direcao, "tempo": TIMEFRAME + WAIT_BUFFER},),
+                target=resultado,
+                args=({"ativo":ativo,"dir":d,"tempo":TIMEFRAME+WAIT_BUFFER},),
                 daemon=True
             ).start()
 
@@ -160,5 +211,4 @@ def loop_principal():
 # ===============================
 # START
 # ===============================
-if __name__ == "__main__":
-    loop_principal()
+loop()
