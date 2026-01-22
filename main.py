@@ -29,8 +29,10 @@ bot_iniciado = False
 
 modo_teste = True
 teste_realizado = False
+ativo_teste = "frxEURUSD"
 
 last_ws_msg = time.time()
+boot_time = time.time()
 
 # ===============================
 # TELEGRAM
@@ -39,11 +41,7 @@ def send_telegram(msg):
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": msg,
-                "parse_mode": "HTML"
-            },
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
             timeout=5
         )
     except:
@@ -56,34 +54,22 @@ def iniciar_bot():
     global bot_iniciado
     if not bot_iniciado:
         send_telegram(
-            f"🤖 <b>Troia-IA V17</b> ONLINE\n"
+            f"🤖 <b>Troia-IA V17.1</b> ONLINE\n"
             f"🕒 {datetime.now(BR_TZ).strftime('%d/%m %H:%M')} (BR)"
         )
         bot_iniciado = True
 
 # ===============================
-# ESTRATÉGIA M3
+# ESTRATÉGIA
 # ===============================
 def analisar_candles(candles):
     global modo_atual
-
     ult = candles[-6:]
-    altas = 0
-    baixas = 0
-    corpos = []
+    altas = sum(1 for c in ult if float(c["close"]) > float(c["open"]))
+    baixas = 6 - altas
 
-    for c in ult:
-        o = float(c["open"])
-        cl = float(c["close"])
-        corpo = abs(cl - o)
-        corpos.append(corpo)
-        if cl > o:
-            altas += 1
-        else:
-            baixas += 1
-
-    media_corpo = sum(corpos) / len(corpos)
-    modo_atual = "AGRESSIVO" if media_corpo > corpos[-1] * 0.8 else "CONSERVADOR"
+    corpos = [abs(float(c["close"]) - float(c["open"])) for c in ult]
+    modo_atual = "AGRESSIVO" if sum(corpos)/6 > corpos[-1]*0.8 else "CONSERVADOR"
 
     if altas >= 4:
         return "CALL"
@@ -94,14 +80,25 @@ def analisar_candles(candles):
 def calcular_resultado(direcao, candle):
     o = float(candle["open"])
     cl = float(candle["close"])
-    if direcao == "CALL":
-        return "GREEN ✅" if cl > o else "RED ❌"
-    else:
-        return "GREEN ✅" if cl < o else "RED ❌"
+    return "GREEN ✅" if (cl > o if direcao == "CALL" else cl < o) else "RED ❌"
 
 # ===============================
-# WEBSOCKET MESSAGE
+# WEBSOCKET
 # ===============================
+def on_open(ws):
+    global last_ws_msg
+    last_ws_msg = time.time()
+    iniciar_bot()
+
+    for ativo in ATIVOS:
+        ws.send(json.dumps({
+            "ticks_history": ativo,
+            "style": "candles",
+            "granularity": TIMEFRAME,
+            "count": 20
+        }))
+        time.sleep(0.25)
+
 def on_message(ws, msg):
     global sinal_ativo, modo_teste, teste_realizado, last_ws_msg
     last_ws_msg = time.time()
@@ -114,9 +111,9 @@ def on_message(ws, msg):
     candles = data["candles"]
 
     # ===============================
-    # TESTE INICIAL
+    # TESTE INICIAL (somente EURUSD)
     # ===============================
-    if modo_teste and not teste_realizado:
+    if modo_teste and not teste_realizado and ativo == ativo_teste:
         if sinal_ativo is None:
             direcao = analisar_candles(candles)
             if not direcao:
@@ -179,15 +176,12 @@ def on_message(ws, msg):
         f"🕒 {datetime.now(BR_TZ).strftime('%H:%M')}"
     )
 
-# ===============================
-# WEBSOCKET LOOP
-# ===============================
 def ws_loop():
     while True:
         try:
             ws = websocket.WebSocketApp(
                 DERIV_WS_URL,
-                on_open=lambda w: iniciar_bot(),
+                on_open=on_open,
                 on_message=on_message,
                 on_error=lambda w, e: None,
                 on_close=lambda w, *a: None
@@ -202,19 +196,19 @@ def ws_loop():
 # ===============================
 def watchdog():
     while True:
-        if time.time() - last_ws_msg > 90:
+        if time.time() - last_ws_msg > 150 and time.time() - boot_time > 120:
             send_telegram("⚠️ WebSocket inativo. Reiniciando serviço...")
             os._exit(1)
         time.sleep(30)
 
 # ===============================
-# HTTP KEEP ALIVE
+# HTTP
 # ===============================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Troia-IA V17 ONLINE")
+        self.wfile.write(b"Troia-IA V17.1 ONLINE")
 
 # ===============================
 # MAIN
@@ -222,5 +216,4 @@ class HealthHandler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=ws_loop, daemon=True).start()
-    iniciar_bot()
     HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
