@@ -3,17 +3,19 @@ from collections import deque, defaultdict
 from datetime import datetime, timezone, timedelta
 
 # ===============================
-# CONFIGURAÇÃO
+# CONFIGURAÇÃO FIXA (SUAS CREDENCIAIS)
 # ===============================
+DERIV_API_KEY = "UEISANwBEI9sPVR"
+
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
-TIMEFRAME = 300
+TIMEFRAME = 300  # M5
 WAIT_BUFFER = 10
 DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 
 SCAN_DELAY = 3
-MAX_SINAIS_HORA = 5
+MAX_SINAIS_HORA = 8
 
 # UTC-3 (Brasil)
 BR_TZ = timezone(timedelta(hours=-3))
@@ -22,25 +24,24 @@ sinal_em_analise = threading.Event()
 bot_iniciado = False
 
 # ===============================
-# MODOS
+# MODO – FOCO EM SINAIS
 # ===============================
 MODO = "AGRESSIVO"
 
-MODOS = {
-    "AGRESSIVO": {"CONF_MIN":46,"PROB_MIN":52,"CONFIRM":1,"TEND":6,"MINPCT":0.00008},
-    "MODERADO":  {"CONF_MIN":50,"PROB_MIN":55,"CONFIRM":2,"TEND":10,"MINPCT":0.00012},
-    "CONSERVADOR":{"CONF_MIN":55,"PROB_MIN":60,"CONFIRM":3,"TEND":14,"MINPCT":0.00018}
+CFG = {
+    "CONF_MIN": 42,
+    "PROB_MIN": 48,
+    "CONFIRM": 1,
+    "TEND": 3,
+    "MINPCT": 0.00002
 }
 
-CFG = MODOS[MODO]
-
 # ===============================
-# ATIVOS
+# ATIVOS — SOMENTE MERCADO REAL
 # ===============================
 ATIVOS = [
     "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD","frxUSDCAD",
-    "frxUSDCHF","frxNZDUSD","frxEURJPY","frxGBPJPY",
-    "R_10","R_25","R_50","R_75","R_100"
+    "frxUSDCHF","frxNZDUSD","frxEURJPY","frxGBPJPY"
 ]
 
 # ===============================
@@ -59,40 +60,20 @@ def tg(msg):
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": msg,
+                "parse_mode": "HTML"
+            },
             timeout=5
         )
     except:
         pass
 
 # ===============================
-# IA ADAPTATIVA
-# ===============================
-def ia_adaptativa():
-    global MODO, CFG
-    if len(historico_resultados) < 5:
-        return
-
-    g = historico_resultados.count("G")
-    r = historico_resultados.count("R")
-
-    novo = "MODERADO"
-    if r >= 4: novo = "CONSERVADOR"
-    elif g >= 4: novo = "AGRESSIVO"
-
-    if novo != MODO:
-        MODO = novo
-        CFG = MODOS[MODO]
-        tg(
-            f"🧠 <b>IA ADAPTATIVA</b>\n"
-            f"Modo: <b>{MODO}</b>\n"
-            f"Últimos 5: {''.join(historico_resultados)}"
-        )
-
-# ===============================
 # ANÁLISES
 # ===============================
-def direcao(c): 
+def direcao(c):
     return "CALL" if c["close"] > c["open"] else "PUT"
 
 def direcao_confirmada(c):
@@ -102,10 +83,9 @@ def direcao_confirmada(c):
     return None
 
 def confianca(c):
-    return int(max(
-        sum(1 for x in c if direcao(x) == "CALL"),
-        sum(1 for x in c if direcao(x) == "PUT")
-    ) / len(c) * 100)
+    call = sum(1 for x in c if direcao(x) == "CALL")
+    put  = sum(1 for x in c if direcao(x) == "PUT")
+    return int(max(call, put) / len(c) * 100)
 
 def tendencia(c):
     if len(c) < CFG["TEND"]:
@@ -119,11 +99,16 @@ def prob(c, d):
     return int(sum(1 for x in c if direcao(x) == d) / len(c) * 100)
 
 # ===============================
-# DERIV WS
+# DERIV WS (SEM OTC)
 # ===============================
 def candles_ws(ativo, count=50):
     try:
         ws = websocket.create_connection(DERIV_WS_URL, timeout=6)
+        ws.send(json.dumps({
+            "authorize": DERIV_API_KEY
+        }))
+        ws.recv()
+
         ws.send(json.dumps({
             "ticks_history": ativo,
             "style": "candles",
@@ -152,16 +137,13 @@ def resultado(res):
         stats["red"] += 1
         historico_resultados.append("R")
 
-    ia_adaptativa()
-
     acc = int(stats["green"] / stats["total"] * 100)
 
     tg(
         f"📊 <b>RESULTADO</b>\n"
         f"{'🟢 GREEN' if win else '🔴 RED'}\n"
         f"Ativo: {res['ativo']}\n"
-        f"🎯 Assertividade: {acc}%\n"
-        f"Modo: {MODO}"
+        f"Assertividade: {acc}%"
     )
 
     sinal_em_analise.clear()
@@ -174,13 +156,11 @@ def relatorio_hora():
     while True:
         time.sleep(60)
         agora = datetime.now(BR_TZ).hour
-
         if agora != hora_atual:
             tg(
                 f"⏰ <b>RELATÓRIO DA HORA</b>\n"
                 f"Sinais: {sinais_por_hora[hora_atual]}\n"
-                f"Green: {stats['green']} | Red: {stats['red']}\n"
-                f"Modo: {MODO}"
+                f"Green: {stats['green']} | Red: {stats['red']}"
             )
             sinais_por_hora[agora] = 0
             hora_atual = agora
@@ -192,7 +172,7 @@ def loop_principal():
     global bot_iniciado
 
     if not bot_iniciado:
-        tg("🚀 <b>TROIA-IA-V16 INICIADO</b>\n5 sinais/h • M5 • OTC ATIVO")
+        tg("🚀 <b>TROIA-IA-V16 INICIADO</b>\nMercado REAL • M5 • Foco em sinais")
         bot_iniciado = True
 
     ultimo = {}
@@ -202,7 +182,7 @@ def loop_principal():
             agora = datetime.now(BR_TZ).hour
 
             if sinais_por_hora[agora] >= MAX_SINAIS_HORA:
-                time.sleep(30)
+                time.sleep(20)
                 continue
 
             for ativo in ATIVOS:
@@ -210,7 +190,7 @@ def loop_principal():
                     break
 
                 c = candles_ws(ativo)
-                if len(c) < 30:
+                if len(c) < 20:
                     continue
 
                 d = direcao_confirmada(c)
@@ -221,17 +201,17 @@ def loop_principal():
                 if not t or d != t:
                     continue
 
-                if confianca(c[-20:]) < CFG["CONF_MIN"]:
+                if confianca(c[-15:]) < CFG["CONF_MIN"]:
                     continue
 
                 if prob(c, d) < CFG["PROB_MIN"]:
                     continue
 
-                ultimo_t = ultimo.get(f"{ativo}_t", 0)
-                if time.time() - ultimo_t < 600:
+                ultimo_t = ultimo.get(ativo, 0)
+                if time.time() - ultimo_t < 240:
                     continue
 
-                ultimo[f"{ativo}_t"] = time.time()
+                ultimo[ativo] = time.time()
                 sinal_em_analise.set()
                 sinais_por_hora[agora] += 1
 
@@ -240,7 +220,7 @@ def loop_principal():
                     f"Ativo: {ativo}\n"
                     f"Direção: {d}\n"
                     f"Hora BR: {datetime.now(BR_TZ).strftime('%H:%M')}\n"
-                    f"Sinais/h: {sinais_por_hora[agora]}/{MAX_SINAIS_HORA}"
+                    f"{sinais_por_hora[agora]}/{MAX_SINAIS_HORA} sinais/h"
                 )
 
                 threading.Thread(
@@ -252,16 +232,8 @@ def loop_principal():
             time.sleep(SCAN_DELAY)
 
         except Exception as e:
-            print("ERRO LOOP:", e)
-            time.sleep(10)
-
-# ===============================
-# KEEP ALIVE
-# ===============================
-def keep_alive():
-    while True:
-        print("🟢 Bot rodando...")
-        time.sleep(30)
+            print("ERRO:", e)
+            time.sleep(5)
 
 # ===============================
 # START
@@ -269,4 +241,7 @@ def keep_alive():
 if __name__ == "__main__":
     threading.Thread(target=loop_principal, daemon=True).start()
     threading.Thread(target=relatorio_hora, daemon=True).start()
-    keep_alive()
+
+    while True:
+        print("🟢 TROIA-IA rodando (Mercado REAL)…")
+        time.sleep(30)
