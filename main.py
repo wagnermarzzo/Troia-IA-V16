@@ -86,7 +86,8 @@ def ia_adaptativa():
 # ===============================
 # ANÁLISES
 # ===============================
-def direcao(c): return "CALL" if c["close"] > c["open"] else "PUT"
+def direcao(c): 
+    return "CALL" if c["close"] > c["open"] else "PUT"
 
 def direcao_confirmada(c):
     ult = c[-CFG["CONFIRM"]:]
@@ -101,6 +102,8 @@ def confianca(c):
     ) / len(c) * 100)
 
 def tendencia(c):
+    if len(c) < CFG["TEND"]:
+        return None
     return "CALL" if c[-1]["close"] > c[-CFG["TEND"]]["close"] else "PUT"
 
 def candle_ok(c):
@@ -124,7 +127,8 @@ def candles_ws(ativo, count=50):
         data = json.loads(ws.recv())
         ws.close()
         return data.get("candles", [])
-    except:
+    except Exception as e:
+        print("Erro WS:", e)
         return []
 
 # ===============================
@@ -160,55 +164,73 @@ def resultado(res):
 # ===============================
 # LOOP PRINCIPAL
 # ===============================
-def loop():
+def loop_principal():
     tg("🚀 <b>BOT INICIADO</b>\nIA Adaptativa ATIVA")
+    print("BOT ONLINE")
+
     ultimo = {}
 
     while True:
-        for ativo in ATIVOS:
-            if sinal_em_analise.is_set():
-                break
+        try:
+            for ativo in ATIVOS:
+                if sinal_em_analise.is_set():
+                    break
 
-            c = candles_ws(ativo)
-            if len(c) < 30:
-                continue
+                c = candles_ws(ativo)
+                if len(c) < 30:
+                    continue
 
-            d = direcao_confirmada(c)
-            if not d or not candle_ok(c[-1]):
-                continue
+                d = direcao_confirmada(c)
+                if not d or not candle_ok(c[-1]):
+                    continue
 
-            if d != tendencia(c):
-                continue
+                t = tendencia(c)
+                if not t or d != t:
+                    continue
 
-            if confianca(c[-20:]) < CFG["CONF_MIN"]:
-                continue
+                if confianca(c[-20:]) < CFG["CONF_MIN"]:
+                    continue
 
-            if prob(c, d) < CFG["PROB_MIN"]:
-                continue
+                if prob(c, d) < CFG["PROB_MIN"]:
+                    continue
 
-            if ultimo.get(ativo) == d:
-                continue
+                if ultimo.get(ativo) == d:
+                    continue
 
-            ultimo[ativo] = d
-            sinal_em_analise.set()
+                ultimo[ativo] = d
+                sinal_em_analise.set()
 
-            tg(
-                f"💥 <b>SINAL</b>\n"
-                f"Ativo: {ativo}\n"
-                f"Direção: {d}\n"
-                f"Modo: {MODO}\n"
-                f"Entrada: Próxima vela"
-            )
+                tg(
+                    f"💥 <b>SINAL</b>\n"
+                    f"Ativo: {ativo}\n"
+                    f"Direção: {d}\n"
+                    f"Modo: {MODO}\n"
+                    f"Entrada: Próxima vela"
+                )
 
-            threading.Thread(
-                target=resultado,
-                args=({"ativo":ativo,"dir":d,"tempo":TIMEFRAME+WAIT_BUFFER},),
-                daemon=True
-            ).start()
+                threading.Thread(
+                    target=resultado,
+                    args=({"ativo":ativo,"dir":d,"tempo":TIMEFRAME+WAIT_BUFFER},),
+                    daemon=True
+                ).start()
 
-        time.sleep(1)
+            time.sleep(1)
+
+        except Exception as e:
+            print("ERRO LOOP:", e)
+            time.sleep(5)
+
+# ===============================
+# KEEP ALIVE
+# ===============================
+def keep_alive():
+    while True:
+        print("🟢 Bot rodando...")
+        time.sleep(30)
 
 # ===============================
 # START
 # ===============================
-loop()
+if __name__ == "__main__":
+    threading.Thread(target=loop_principal, daemon=True).start()
+    keep_alive()
