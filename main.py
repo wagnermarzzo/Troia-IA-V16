@@ -12,25 +12,22 @@ import os
 # CONFIGURAÇÃO
 # ===============================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
-
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 
-TIMEFRAME = 300
+TIMEFRAME = 300  # 5 minutos
 CONF_MIN = 46
 PROB_MIN = 53
-
 MAX_SINAIS_HORA = 8
 COOLDOWN_ATIVO = 240
 
 BR_TZ = timezone(timedelta(hours=-3))
-
 PORT = int(os.environ.get("PORT", 8080))
 
 # ===============================
-# ATIVOS
+# ATIVOS (10 FOREX)
 # ===============================
 ATIVOS = [
     "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD","frxUSDCAD",
@@ -68,7 +65,7 @@ def iniciar_bot():
         bot_iniciado = True
 
 # ===============================
-# ANÁLISE
+# ANÁLISE DE CANDLE
 # ===============================
 def analisar(ativo, closes):
     if len(closes) < 6:
@@ -100,13 +97,14 @@ def on_message(ws, message):
     closes = [float(c["close"]) for c in data["candles"]]
     agora = int(time.time())
 
+    # cooldown por ativo
     if agora - ultimo_sinal[ativo] < COOLDOWN_ATIVO:
         return
 
+    # limite de sinais por hora
     sinais_hora.append(agora)
     while sinais_hora and agora - sinais_hora[0] > 3600:
         sinais_hora.popleft()
-
     if len(sinais_hora) >= MAX_SINAIS_HORA:
         return
 
@@ -159,7 +157,7 @@ def iniciar_ws():
     ws.run_forever(ping_interval=30, ping_timeout=10)
 
 # ===============================
-# HTTP KEEP ALIVE
+# HTTP KEEP-ALIVE PARA RAILWAY
 # ===============================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
