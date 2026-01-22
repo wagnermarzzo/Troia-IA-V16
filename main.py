@@ -15,8 +15,9 @@ BR_TZ = timezone(timedelta(hours=-3))
 PORT = int(os.environ.get("PORT", 8080))
 
 ATIVOS = [
-    "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD",
-    "frxUSDCAD","frxUSDCHF","frxEURJPY","frxGBPJPY"
+    "frxEURUSD","frxGBPUSD","frxUSDJPY",
+    "frxAUDUSD","frxUSDCAD","frxUSDCHF",
+    "frxEURJPY","frxGBPJPY"
 ]
 
 # ===============================
@@ -25,7 +26,11 @@ ATIVOS = [
 sinal_ativo = None
 modo_atual = "CONSERVADOR"
 bot_iniciado = False
-ultimo_ws_ping = time.time()
+
+modo_teste = True
+teste_realizado = False
+
+last_ws_msg = time.time()
 
 # ===============================
 # TELEGRAM
@@ -34,7 +39,11 @@ def send_telegram(msg):
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": msg,
+                "parse_mode": "HTML"
+            },
             timeout=5
         )
     except:
@@ -46,8 +55,10 @@ def send_telegram(msg):
 def iniciar_bot():
     global bot_iniciado
     if not bot_iniciado:
-        hora = datetime.now(BR_TZ).strftime("%d/%m %H:%M")
-        send_telegram(f"🤖 <b>Troia-IA V17</b> iniciado\n🕒 {hora} (BR)")
+        send_telegram(
+            f"🤖 <b>Troia-IA V17</b> ONLINE\n"
+            f"🕒 {datetime.now(BR_TZ).strftime('%d/%m %H:%M')} (BR)"
+        )
         bot_iniciado = True
 
 # ===============================
@@ -62,65 +73,96 @@ def analisar_candles(candles):
     corpos = []
 
     for c in ult:
-        open_, close = float(c["open"]), float(c["close"])
-        corpo = abs(close - open_)
+        o = float(c["open"])
+        cl = float(c["close"])
+        corpo = abs(cl - o)
         corpos.append(corpo)
-        if close > open_:
+        if cl > o:
             altas += 1
         else:
             baixas += 1
 
     media_corpo = sum(corpos) / len(corpos)
-
-    # modo automático
     modo_atual = "AGRESSIVO" if media_corpo > corpos[-1] * 0.8 else "CONSERVADOR"
 
     if altas >= 4:
         return "CALL"
     if baixas >= 4:
         return "PUT"
-
     return None
 
-# ===============================
-# RESULTADO
-# ===============================
-def verificar_resultado(entrada, candle):
-    open_, close = float(candle["open"]), float(candle["close"])
-    if entrada == "CALL":
-        return "GREEN ✅" if close > open_ else "RED ❌"
+def calcular_resultado(direcao, candle):
+    o = float(candle["open"])
+    cl = float(candle["close"])
+    if direcao == "CALL":
+        return "GREEN ✅" if cl > o else "RED ❌"
     else:
-        return "GREEN ✅" if close < open_ else "RED ❌"
+        return "GREEN ✅" if cl < o else "RED ❌"
 
 # ===============================
-# WEBSOCKET
+# WEBSOCKET MESSAGE
 # ===============================
 def on_message(ws, msg):
-    global sinal_ativo
+    global sinal_ativo, modo_teste, teste_realizado, last_ws_msg
+    last_ws_msg = time.time()
 
     data = json.loads(msg)
     if "candles" not in data:
         return
 
-    candles = data["candles"]
     ativo = data["echo_req"]["ticks_history"]
+    candles = data["candles"]
 
-    # Se tem sinal ativo, verificar resultado
-    if sinal_ativo and sinal_ativo["ativo"] == ativo:
-        resultado = verificar_resultado(sinal_ativo["direcao"], candles[-1])
-        hora = datetime.now(BR_TZ).strftime("%H:%M")
+    # ===============================
+    # TESTE INICIAL
+    # ===============================
+    if modo_teste and not teste_realizado:
+        if sinal_ativo is None:
+            direcao = analisar_candles(candles)
+            if not direcao:
+                return
 
+            sinal_ativo = {
+                "ativo": ativo,
+                "direcao": direcao,
+                "teste": True
+            }
+
+            send_telegram(
+                f"🧪 <b>TESTE DE INICIALIZAÇÃO</b>\n"
+                f"📌 {ativo}\n"
+                f"🎯 {direcao}\n"
+                f"⏱️ M3"
+            )
+            return
+
+        if sinal_ativo.get("teste") and ativo == sinal_ativo["ativo"]:
+            res = calcular_resultado(sinal_ativo["direcao"], candles[-1])
+            send_telegram(
+                f"🧪 <b>RESULTADO DO TESTE</b>\n"
+                f"📌 {ativo}\n"
+                f"{res}"
+            )
+            sinal_ativo = None
+            modo_teste = False
+            teste_realizado = True
+            send_telegram("✅ Teste concluído. Bot operando normalmente.")
+            return
+
+    # ===============================
+    # FLUXO NORMAL
+    # ===============================
+    if sinal_ativo and ativo == sinal_ativo["ativo"]:
+        res = calcular_resultado(sinal_ativo["direcao"], candles[-1])
         send_telegram(
             f"📊 <b>RESULTADO</b>\n"
             f"📌 {ativo}\n"
             f"🎯 {sinal_ativo['direcao']}\n"
-            f"📍 {resultado}\n"
-            f"🕒 {hora}"
+            f"{res}"
         )
         sinal_ativo = None
         return
 
-    # Não envia novo sinal se ainda existir um ativo
     if sinal_ativo:
         return
 
@@ -128,62 +170,57 @@ def on_message(ws, msg):
     if not direcao:
         return
 
-    hora = datetime.now(BR_TZ).strftime("%H:%M")
     sinal_ativo = {"ativo": ativo, "direcao": direcao}
-
     send_telegram(
         f"📢 <b>SINAL M3</b>\n"
         f"📌 {ativo}\n"
-        f"⏱️ 3M\n"
-        f"🎯 <b>{direcao}</b>\n"
+        f"🎯 {direcao}\n"
         f"⚙️ Modo: {modo_atual}\n"
-        f"🕒 {hora}"
+        f"🕒 {datetime.now(BR_TZ).strftime('%H:%M')}"
     )
 
-def on_open(ws):
-    iniciar_bot()
-    for ativo in ATIVOS:
-        ws.send(json.dumps({
-            "ticks_history": ativo,
-            "style": "candles",
-            "granularity": TIMEFRAME,
-            "count": 20
-        }))
-        time.sleep(0.3)
-
-def on_close(ws, *args):
-    send_telegram("⚠️ WebSocket caiu. Reconectando...")
-    time.sleep(5)
-    iniciar_ws()
-
-def on_error(ws, error):
-    send_telegram(f"❌ Erro WebSocket: {error}")
-
-def iniciar_ws():
-    ws = websocket.WebSocketApp(
-        DERIV_WS_URL,
-        on_open=on_open,
-        on_message=on_message,
-        on_close=on_close,
-        on_error=on_error
-    )
-    ws.run_forever(ping_interval=30, ping_timeout=10)
+# ===============================
+# WEBSOCKET LOOP
+# ===============================
+def ws_loop():
+    while True:
+        try:
+            ws = websocket.WebSocketApp(
+                DERIV_WS_URL,
+                on_open=lambda w: iniciar_bot(),
+                on_message=on_message,
+                on_error=lambda w, e: None,
+                on_close=lambda w, *a: None
+            )
+            ws.run_forever(ping_interval=30, ping_timeout=10)
+        except:
+            pass
+        time.sleep(5)
 
 # ===============================
-# HTTP HEALTH
+# WATCHDOG
 # ===============================
-class Health(BaseHTTPRequestHandler):
+def watchdog():
+    while True:
+        if time.time() - last_ws_msg > 90:
+            send_telegram("⚠️ WebSocket inativo. Reiniciando serviço...")
+            os._exit(1)
+        time.sleep(30)
+
+# ===============================
+# HTTP KEEP ALIVE
+# ===============================
+class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Troia-IA V17 ONLINE")
 
-def iniciar_http():
-    HTTPServer(("0.0.0.0", PORT), Health).serve_forever()
-
 # ===============================
 # MAIN
 # ===============================
 if __name__ == "__main__":
-    threading.Thread(target=iniciar_http, daemon=True).start()
-    iniciar_ws()
+    threading.Thread(target=watchdog, daemon=True).start()
+    threading.Thread(target=ws_loop, daemon=True).start()
+    iniciar_bot()
+    HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
