@@ -1,6 +1,6 @@
 import json, time, requests, threading, websocket
 from collections import deque, defaultdict
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # ===============================
 # CONFIGURAÇÃO
@@ -12,10 +12,14 @@ TIMEFRAME = 300
 WAIT_BUFFER = 10
 DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 
-SCAN_DELAY = 3           # segundos entre varreduras
-MAX_SINAIS_HORA = 5      # HARD CAP
+SCAN_DELAY = 3
+MAX_SINAIS_HORA = 5
+
+# UTC-3 (Brasil)
+BR_TZ = timezone(timedelta(hours=-3))
 
 sinal_em_analise = threading.Event()
+bot_iniciado = False
 
 # ===============================
 # MODOS
@@ -23,33 +27,15 @@ sinal_em_analise = threading.Event()
 MODO = "AGRESSIVO"
 
 MODOS = {
-    "AGRESSIVO": {
-        "CONF_MIN": 46,
-        "PROB_MIN": 52,
-        "CONFIRM": 1,
-        "TEND": 6,
-        "MINPCT": 0.00008
-    },
-    "MODERADO": {
-        "CONF_MIN": 50,
-        "PROB_MIN": 55,
-        "CONFIRM": 2,
-        "TEND": 10,
-        "MINPCT": 0.00012
-    },
-    "CONSERVADOR": {
-        "CONF_MIN": 55,
-        "PROB_MIN": 60,
-        "CONFIRM": 3,
-        "TEND": 14,
-        "MINPCT": 0.00018
-    }
+    "AGRESSIVO": {"CONF_MIN":46,"PROB_MIN":52,"CONFIRM":1,"TEND":6,"MINPCT":0.00008},
+    "MODERADO":  {"CONF_MIN":50,"PROB_MIN":55,"CONFIRM":2,"TEND":10,"MINPCT":0.00012},
+    "CONSERVADOR":{"CONF_MIN":55,"PROB_MIN":60,"CONFIRM":3,"TEND":14,"MINPCT":0.00018}
 }
 
 CFG = MODOS[MODO]
 
 # ===============================
-# ATIVOS (FOREX + OTC)
+# ATIVOS
 # ===============================
 ATIVOS = [
     "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD","frxUSDCAD",
@@ -62,9 +48,9 @@ ATIVOS = [
 # ===============================
 stats = {"total":0,"green":0,"red":0}
 historico_resultados = deque(maxlen=5)
-
 sinais_por_hora = defaultdict(int)
-hora_atual = datetime.utcnow().hour
+
+hora_atual = datetime.now(BR_TZ).hour
 
 # ===============================
 # TELEGRAM
@@ -84,7 +70,6 @@ def tg(msg):
 # ===============================
 def ia_adaptativa():
     global MODO, CFG
-
     if len(historico_resultados) < 5:
         return
 
@@ -92,10 +77,8 @@ def ia_adaptativa():
     r = historico_resultados.count("R")
 
     novo = "MODERADO"
-    if r >= 4:
-        novo = "CONSERVADOR"
-    elif g >= 4:
-        novo = "AGRESSIVO"
+    if r >= 4: novo = "CONSERVADOR"
+    elif g >= 4: novo = "AGRESSIVO"
 
     if novo != MODO:
         MODO = novo
@@ -136,7 +119,7 @@ def prob(c, d):
     return int(sum(1 for x in c if direcao(x) == d) / len(c) * 100)
 
 # ===============================
-# DERIV WS (LEVE)
+# DERIV WS
 # ===============================
 def candles_ws(ativo, count=50):
     try:
@@ -187,36 +170,36 @@ def resultado(res):
 # RELATÓRIO POR HORA
 # ===============================
 def relatorio_hora():
+    global hora_atual
     while True:
         time.sleep(60)
-        global hora_atual
-        agora = datetime.utcnow().hour
+        agora = datetime.now(BR_TZ).hour
 
         if agora != hora_atual:
-            hora_atual = agora
-            total = stats["total"]
-            g = stats["green"]
-            r = stats["red"]
-
             tg(
-                f"⏰ <b>RELATÓRIO DA ÚLTIMA HORA</b>\n"
-                f"Sinais: {sinais_por_hora[hora_atual-1]}\n"
-                f"Green: {g} | Red: {r}\n"
-                f"Modo atual: {MODO}"
+                f"⏰ <b>RELATÓRIO DA HORA</b>\n"
+                f"Sinais: {sinais_por_hora[hora_atual]}\n"
+                f"Green: {stats['green']} | Red: {stats['red']}\n"
+                f"Modo: {MODO}"
             )
-
-            sinais_por_hora[hora_atual] = 0
+            sinais_por_hora[agora] = 0
+            hora_atual = agora
 
 # ===============================
 # LOOP PRINCIPAL
 # ===============================
 def loop_principal():
-    tg("🚀 <b>BOT INICIADO</b>\nLimite: 5 sinais/h\nOTC ATIVO")
+    global bot_iniciado
+
+    if not bot_iniciado:
+        tg("🚀 <b>TROIA-IA-V16 INICIADO</b>\n5 sinais/h • M5 • OTC ATIVO")
+        bot_iniciado = True
+
     ultimo = {}
 
     while True:
         try:
-            agora = datetime.utcnow().hour
+            agora = datetime.now(BR_TZ).hour
 
             if sinais_por_hora[agora] >= MAX_SINAIS_HORA:
                 time.sleep(30)
@@ -256,8 +239,8 @@ def loop_principal():
                     f"💥 <b>SINAL</b>\n"
                     f"Ativo: {ativo}\n"
                     f"Direção: {d}\n"
-                    f"Modo: {MODO}\n"
-                    f"Sinais nesta hora: {sinais_por_hora[agora]}/{MAX_SINAIS_HORA}"
+                    f"Hora BR: {datetime.now(BR_TZ).strftime('%H:%M')}\n"
+                    f"Sinais/h: {sinais_por_hora[agora]}/{MAX_SINAIS_HORA}"
                 )
 
                 threading.Thread(
