@@ -2,6 +2,7 @@ import websocket
 import json
 import time
 import requests
+import threading
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict, deque
 
@@ -46,19 +47,18 @@ ATIVOS = [
 ultimo_sinal_ativo = defaultdict(int)
 sinais_hora = deque()
 bot_iniciado = False
+ws_ativo = None
 
 # ===============================
 # TELEGRAM
 # ===============================
 def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": msg,
-        "parse_mode": "HTML"
-    }
     try:
-        requests.post(url, data=data, timeout=5)
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+            timeout=5
+        )
     except:
         pass
 
@@ -68,11 +68,11 @@ def send_telegram(msg):
 def iniciar_bot():
     global bot_iniciado
     if not bot_iniciado:
-        agora = datetime.now(BR_TZ).strftime("%d/%m %H:%M")
+        hora = datetime.now(BR_TZ).strftime("%d/%m %H:%M")
         send_telegram(
             f"🤖 <b>Troia-IA V16 iniciado</b>\n"
-            f"📊 Modo: SIGNAL MODE\n"
-            f"🕒 {agora} (BR)"
+            f"📊 Signal Mode\n"
+            f"🕒 {hora} (BR)"
         )
         bot_iniciado = True
 
@@ -112,18 +112,15 @@ def on_message(ws, message):
     if "candles" not in data:
         return
 
-    ativo = data["echo_req"].get("ticks_history")
+    ativo = data["echo_req"]["ticks_history"]
     closes = [float(c["close"]) for c in data["candles"]]
+    agora = int(time.time())
 
-    agora_ts = int(time.time())
-
-    # cooldown por ativo
-    if agora_ts - ultimo_sinal_ativo[ativo] < COOLDOWN_ATIVO:
+    if agora - ultimo_sinal_ativo[ativo] < COOLDOWN_ATIVO:
         return
 
-    # limite por hora
-    sinais_hora.append(agora_ts)
-    while sinais_hora and agora_ts - sinais_hora[0] > 3600:
+    sinais_hora.append(agora)
+    while sinais_hora and agora - sinais_hora[0] > 3600:
         sinais_hora.popleft()
 
     if len(sinais_hora) >= MAX_SINAIS_HORA:
@@ -134,14 +131,13 @@ def on_message(ws, message):
         return
 
     direcao, conf, prob = resultado
-    ultimo_sinal_ativo[ativo] = agora_ts
-
-    hora_br = datetime.now(BR_TZ).strftime("%H:%M")
+    ultimo_sinal_ativo[ativo] = agora
+    hora = datetime.now(BR_TZ).strftime("%H:%M")
 
     send_telegram(
         f"📊 <b>SINAL FOREX</b>\n"
         f"📌 <b>{ativo}</b>\n"
-        f"⏱️ {TIMEFRAME//60}m | {hora_br}\n"
+        f"⏱️ {TIMEFRAME//60}m | {hora}\n"
         f"🎯 <b>{direcao}</b>\n"
         f"📈 Conf: {conf}% | Prob: {prob}%"
     )
@@ -155,28 +151,35 @@ def on_open(ws):
             "granularity": TIMEFRAME,
             "count": 20
         }))
-        time.sleep(0.2)
+        time.sleep(0.25)
 
 def on_error(ws, error):
     print("Erro WebSocket:", error)
 
-def on_close(ws):
-    print("WebSocket fechado. Reconectando em 5s...")
+def on_close(ws, close_status_code, close_msg):
+    print(f"WebSocket fechado ({close_status_code}) {close_msg}")
+    threading.Thread(target=reconectar_ws, daemon=True).start()
+
+# ===============================
+# RECONEXÃO SEGURA
+# ===============================
+def reconectar_ws():
     time.sleep(5)
     iniciar_ws()
 
 # ===============================
-# INICIAR WS
+# START WS
 # ===============================
 def iniciar_ws():
-    ws = websocket.WebSocketApp(
+    global ws_ativo
+    ws_ativo = websocket.WebSocketApp(
         DERIV_WS_URL,
         on_open=on_open,
         on_message=on_message,
         on_error=on_error,
         on_close=on_close
     )
-    ws.run_forever()
+    ws_ativo.run_forever(ping_interval=30, ping_timeout=10)
 
 # ===============================
 # MAIN
