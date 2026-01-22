@@ -5,6 +5,8 @@ import requests
 import threading
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict, deque
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import os
 
 # ===============================
 # CONFIGURAÇÃO
@@ -25,8 +27,10 @@ COOLDOWN_ATIVO = 240
 
 BR_TZ = timezone(timedelta(hours=-3))
 
+PORT = int(os.environ.get("PORT", 8080))
+
 # ===============================
-# ATIVOS (10 FOREX)
+# ATIVOS
 # ===============================
 ATIVOS = [
     "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD","frxUSDCAD",
@@ -54,7 +58,7 @@ def send_telegram(msg):
         pass
 
 # ===============================
-# START BOT
+# BOT START
 # ===============================
 def iniciar_bot():
     global bot_iniciado
@@ -85,7 +89,7 @@ def analisar(ativo, closes):
     return None
 
 # ===============================
-# WEBSOCKET CALLBACKS
+# WEBSOCKET
 # ===============================
 def on_message(ws, message):
     data = json.loads(message)
@@ -137,13 +141,10 @@ def on_error(ws, error):
     print("Erro WebSocket:", error)
 
 def on_close(ws, *args):
-    print("WebSocket fechado. Reconectando…")
-    threading.Thread(target=reconectar, daemon=True).start()
+    print("WebSocket fechado. Reconectando...")
+    threading.Thread(target=reconectar_ws, daemon=True).start()
 
-# ===============================
-# RECONEXÃO
-# ===============================
-def reconectar():
+def reconectar_ws():
     time.sleep(5)
     iniciar_ws()
 
@@ -158,7 +159,21 @@ def iniciar_ws():
     ws.run_forever(ping_interval=30, ping_timeout=10)
 
 # ===============================
+# HTTP KEEP ALIVE
+# ===============================
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Troia-IA V16 ONLINE")
+
+def iniciar_http():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    server.serve_forever()
+
+# ===============================
 # MAIN
 # ===============================
 if __name__ == "__main__":
+    threading.Thread(target=iniciar_http, daemon=True).start()
     iniciar_ws()
