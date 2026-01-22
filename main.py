@@ -9,8 +9,8 @@ TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 TIMEFRAME = 300
-CONF_MIN = 55
-PROB_MIN = 70
+CONF_MIN = 52
+PROB_MIN = 60
 WAIT_BUFFER = 10
 RECONNECT_DELAY = 5
 
@@ -52,7 +52,7 @@ def enviar_sinal(msg):
 def direcao_candle(c):
     return "CALL" if c["close"] > c["open"] else "PUT"
 
-def direcao_confirmada(candles, n=3):
+def direcao_confirmada(candles, n=2):
     ult = candles[-n:]
     if all(c["close"] > c["open"] for c in ult): return "CALL"
     if all(c["close"] < c["open"] for c in ult): return "PUT"
