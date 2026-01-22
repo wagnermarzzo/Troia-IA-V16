@@ -1,6 +1,6 @@
 import websocket, json, time, threading, requests, os
 from datetime import datetime, timezone, timedelta
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ===============================
 # CONFIGURAÇÃO
@@ -54,7 +54,7 @@ def iniciar_bot():
     global bot_iniciado
     if not bot_iniciado:
         send_telegram(
-            f"🤖 <b>Troia-IA V17.1</b> ONLINE\n"
+            f"🤖 <b>Troia-IA V17.2</b> ONLINE\n"
             f"🕒 {datetime.now(BR_TZ).strftime('%d/%m %H:%M')} (BR)"
         )
         bot_iniciado = True
@@ -97,7 +97,7 @@ def on_open(ws):
             "granularity": TIMEFRAME,
             "count": 20
         }))
-        time.sleep(0.25)
+        time.sleep(0.2)
 
 def on_message(ws, msg):
     global sinal_ativo, modo_teste, teste_realizado, last_ws_msg
@@ -111,7 +111,7 @@ def on_message(ws, msg):
     candles = data["candles"]
 
     # ===============================
-    # TESTE INICIAL (somente EURUSD)
+    # TESTE INICIAL
     # ===============================
     if modo_teste and not teste_realizado and ativo == ativo_teste:
         if sinal_ativo is None:
@@ -119,43 +119,33 @@ def on_message(ws, msg):
             if not direcao:
                 return
 
-            sinal_ativo = {
-                "ativo": ativo,
-                "direcao": direcao,
-                "teste": True
-            }
-
+            sinal_ativo = {"ativo": ativo, "direcao": direcao, "teste": True}
             send_telegram(
                 f"🧪 <b>TESTE DE INICIALIZAÇÃO</b>\n"
-                f"📌 {ativo}\n"
-                f"🎯 {direcao}\n"
-                f"⏱️ M3"
+                f"📌 {ativo}\n🎯 {direcao}\n⏱️ M3"
             )
             return
 
-        if sinal_ativo.get("teste") and ativo == sinal_ativo["ativo"]:
+        if sinal_ativo.get("teste"):
             res = calcular_resultado(sinal_ativo["direcao"], candles[-1])
             send_telegram(
                 f"🧪 <b>RESULTADO DO TESTE</b>\n"
-                f"📌 {ativo}\n"
-                f"{res}"
+                f"📌 {ativo}\n{res}"
             )
             sinal_ativo = None
             modo_teste = False
             teste_realizado = True
-            send_telegram("✅ Teste concluído. Bot operando normalmente.")
+            send_telegram("✅ Teste concluído. Operação normal.")
             return
 
     # ===============================
-    # FLUXO NORMAL
+    # OPERAÇÃO NORMAL
     # ===============================
     if sinal_ativo and ativo == sinal_ativo["ativo"]:
         res = calcular_resultado(sinal_ativo["direcao"], candles[-1])
         send_telegram(
             f"📊 <b>RESULTADO</b>\n"
-            f"📌 {ativo}\n"
-            f"🎯 {sinal_ativo['direcao']}\n"
-            f"{res}"
+            f"📌 {ativo}\n🎯 {sinal_ativo['direcao']}\n{res}"
         )
         sinal_ativo = None
         return
@@ -170,9 +160,8 @@ def on_message(ws, msg):
     sinal_ativo = {"ativo": ativo, "direcao": direcao}
     send_telegram(
         f"📢 <b>SINAL M3</b>\n"
-        f"📌 {ativo}\n"
-        f"🎯 {direcao}\n"
-        f"⚙️ Modo: {modo_atual}\n"
+        f"📌 {ativo}\n🎯 {direcao}\n"
+        f"⚙️ {modo_atual}\n"
         f"🕒 {datetime.now(BR_TZ).strftime('%H:%M')}"
     )
 
@@ -182,9 +171,7 @@ def ws_loop():
             ws = websocket.WebSocketApp(
                 DERIV_WS_URL,
                 on_open=on_open,
-                on_message=on_message,
-                on_error=lambda w, e: None,
-                on_close=lambda w, *a: None
+                on_message=on_message
             )
             ws.run_forever(ping_interval=30, ping_timeout=10)
         except:
@@ -196,24 +183,31 @@ def ws_loop():
 # ===============================
 def watchdog():
     while True:
-        if time.time() - last_ws_msg > 150 and time.time() - boot_time > 120:
-            send_telegram("⚠️ WebSocket inativo. Reiniciando serviço...")
+        if time.time() - last_ws_msg > 180 and time.time() - boot_time > 120:
+            send_telegram("⚠️ WebSocket travado. Reiniciando serviço...")
             os._exit(1)
         time.sleep(30)
 
 # ===============================
-# HTTP
+# HTTP HEALTH
 # ===============================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Troia-IA V17.1 ONLINE")
+        self.wfile.write(b"Troia-IA V17.2 ONLINE")
+
+def http_server():
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
+    server.serve_forever()
 
 # ===============================
 # MAIN
 # ===============================
 if __name__ == "__main__":
+    threading.Thread(target=http_server, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=ws_loop, daemon=True).start()
-    HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
+
+    while True:
+        time.sleep(60)
