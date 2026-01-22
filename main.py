@@ -1,23 +1,17 @@
-import websocket
-import json
-import time
-import requests
-import threading
+import websocket, json, time, requests, threading, os
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict, deque
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import os
 
 # ===============================
 # CONFIGURAÇÃO
 # ===============================
-DERIV_API_KEY = "UEISANwBEI9sPVR"
+DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
-DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
-
-TIMEFRAME = 300  # 5 minutos
+TIMEFRAME = 300
 CONF_MIN = 46
 PROB_MIN = 53
 MAX_SINAIS_HORA = 8
@@ -26,20 +20,18 @@ COOLDOWN_ATIVO = 240
 BR_TZ = timezone(timedelta(hours=-3))
 PORT = int(os.environ.get("PORT", 8080))
 
-# ===============================
-# ATIVOS (10 FOREX)
-# ===============================
 ATIVOS = [
     "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD","frxUSDCAD",
     "frxUSDCHF","frxEURJPY","frxGBPJPY","frxEURGBP","frxAUDJPY"
 ]
 
 # ===============================
-# CONTROLE
+# CONTROLE GLOBAL
 # ===============================
 ultimo_sinal = defaultdict(int)
 sinais_hora = deque()
 bot_iniciado = False
+ultimo_trafego = time.time()
 
 # ===============================
 # TELEGRAM
@@ -55,7 +47,7 @@ def send_telegram(msg):
         pass
 
 # ===============================
-# BOT START
+# START BOT
 # ===============================
 def iniciar_bot():
     global bot_iniciado
@@ -65,30 +57,31 @@ def iniciar_bot():
         bot_iniciado = True
 
 # ===============================
-# ANÁLISE DE CANDLE
+# ANÁLISE
 # ===============================
 def analisar(ativo, closes):
     if len(closes) < 6:
         return None
 
     ult = closes[-5:]
-    alta = sum(1 for i in range(1,5) if ult[i] > ult[i-1])
+    alta = sum(1 for i in range(1, 5) if ult[i] > ult[i-1])
     baixa = 4 - alta
 
     direcao = "CALL" if alta >= 3 else "PUT"
     conf = 45 + (alta if direcao == "CALL" else baixa) * 2
     prob = conf + 7
 
-    print(f"[CHECK] {ativo} {direcao} conf={conf} prob={prob}")
-
     if conf >= CONF_MIN and prob >= PROB_MIN:
         return direcao, conf, prob
     return None
 
 # ===============================
-# WEBSOCKET
+# WS CALLBACKS
 # ===============================
 def on_message(ws, message):
+    global ultimo_trafego
+    ultimo_trafego = time.time()
+
     data = json.loads(message)
     if "candles" not in data:
         return
@@ -97,11 +90,9 @@ def on_message(ws, message):
     closes = [float(c["close"]) for c in data["candles"]]
     agora = int(time.time())
 
-    # cooldown por ativo
     if agora - ultimo_sinal[ativo] < COOLDOWN_ATIVO:
         return
 
-    # limite de sinais por hora
     sinais_hora.append(agora)
     while sinais_hora and agora - sinais_hora[0] > 3600:
         sinais_hora.popleft()
@@ -133,31 +124,44 @@ def on_open(ws):
             "granularity": TIMEFRAME,
             "count": 20
         }))
-        time.sleep(0.25)
+        time.sleep(0.3)
 
 def on_error(ws, error):
-    print("Erro WebSocket:", error)
+    print("❌ WS erro:", error)
 
-def on_close(ws, *args):
-    print("WebSocket fechado. Reconectando...")
-    threading.Thread(target=reconectar_ws, daemon=True).start()
-
-def reconectar_ws():
-    time.sleep(5)
-    iniciar_ws()
-
-def iniciar_ws():
-    ws = websocket.WebSocketApp(
-        DERIV_WS_URL,
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close
-    )
-    ws.run_forever(ping_interval=30, ping_timeout=10)
+def on_close(ws, code, reason):
+    print("🔴 WS fechado:", code, reason)
 
 # ===============================
-# HTTP KEEP-ALIVE PARA RAILWAY
+# GERENCIADOR WS (ÚNICO)
+# ===============================
+def iniciar_ws():
+    while True:
+        try:
+            ws = websocket.WebSocketApp(
+                DERIV_WS_URL,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close
+            )
+            ws.run_forever(ping_interval=25, ping_timeout=10)
+        except Exception as e:
+            print("Erro crítico WS:", e)
+        time.sleep(5)
+
+# ===============================
+# WATCHDOG
+# ===============================
+def watchdog():
+    while True:
+        if time.time() - ultimo_trafego > 90:
+            send_telegram("⚠️ Troia-IA reiniciado (WS inativo)")
+            os._exit(1)
+        time.sleep(15)
+
+# ===============================
+# HTTP KEEP ALIVE
 # ===============================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -166,12 +170,12 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Troia-IA V16 ONLINE")
 
 def iniciar_http():
-    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    server.serve_forever()
+    HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
 
 # ===============================
 # MAIN
 # ===============================
 if __name__ == "__main__":
     threading.Thread(target=iniciar_http, daemon=True).start()
+    threading.Thread(target=watchdog, daemon=True).start()
     iniciar_ws()
