@@ -1,37 +1,17 @@
-import json
-import time
-import threading
-import websocket
-import requests
+import websocket, json, time, requests
 from datetime import datetime, timezone, timedelta
 
 # ===============================
 # CONFIGURAÇÃO
 # ===============================
-DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+DERIV_API_KEY = "UEISANwBEI9sPVR"
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
-# Filtros leves para gerar sinais contínuos
-CONF_MIN = 30    # confiança mínima
-PROB_MIN = 30    # probabilidade mínima
-
-RECONNECT_DELAY = 5
-SCAN_DELAY = 3
-
-# Timezone Brasil
-BR_TZ = timezone(timedelta(hours=-3))
-
-# Flags
-sinal_em_analise = threading.Event()
-bot_iniciado = False
-
-# ===============================
-# LISTA DE ATIVOS
-# ===============================
+# Lista de ativos Forex e OTC
 ATIVOS_FOREX = [
     "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD",
-    "frxUSDCAD", "frxUSDCHF", "frxNZDUSD"
+    "frxUSDCAD", "frxUSDCHF", "frxNZDUSD", "frxEURGBP"
 ]
 
 ATIVOS_OTC = [
@@ -39,95 +19,142 @@ ATIVOS_OTC = [
     "OTC_FTI100", "OTC_AUS200", "OTC_JPN225"
 ]
 
+# Configurações de análise
+NUM_CANDLES_ANALISE = 20
+TIMEFRAME = 60  # 1 minuto
+CONF_MIN = 55
+WAIT_AFTER_VELA = 65  # espera 1m05s
+ESTRATEGIA = "Análise últimos 20 candles 1M"
+RECONNECT_DELAY = 3  # segundos caso WS caia
+
+# Timezone Brasil
+BR_TZ = timezone(timedelta(hours=-3))
+
 # ===============================
-# FUNÇÃO DE TELEGRAM
+# TELEGRAM
 # ===============================
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+def tg(msg):
     try:
-        requests.post(url, data=data)
-    except Exception as e:
-        print(f"[Telegram ERRO] {e}")
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode":"HTML"}, timeout=5
+        )
+    except: pass
+
+# ===============================
+# DIREÇÃO E CONFIANÇA
+# ===============================
+def direcao_candle(candle):
+    return "CALL" if candle["close"] > candle["open"] else "PUT"
+
+def calcular_confianca(candles):
+    call = sum(1 for c in candles if c["close"] > c["open"])
+    put = sum(1 for c in candles if c["close"] < c["open"])
+    total = len(candles)
+    maior = max(call, put)
+    return int(maior/total*100)
+
+# ===============================
+# PRÓXIMA VELA
+# ===============================
+def proxima_vela_horario():
+    now = datetime.now(timezone.utc)
+    next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    return next_minute.strftime("%H:%M:%S UTC")
+
+# ===============================
+# FUNÇÃO PARA PEGAR CANDLES
+# ===============================
+def pegar_candles(ativo, count=NUM_CANDLES_ANALISE):
+    while True:
+        try:
+            ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=10)
+            ws.send(json.dumps({"authorize": DERIV_API_KEY}))
+            end_timestamp = int(time.time())
+            ws.send(json.dumps({
+                "ticks_history": ativo,
+                "style": "candles",
+                "granularity": TIMEFRAME,
+                "count": count,
+                "end": end_timestamp
+            }))
+            data = json.loads(ws.recv())
+            ws.close()
+            if "candles" in data:
+                return data["candles"][-count:]
+        except:
+            time.sleep(RECONNECT_DELAY)  # reconectar se falhar
 
 # ===============================
 # CHECAR HORÁRIO OTC
 # ===============================
 def otc_ativo():
-    # Para teste, OTC sempre ativo. Pode ajustar conforme horário real se quiser.
+    # Para teste, sempre ativo; depois pode ajustar para horários reais de OTC
     return True
 
 # ===============================
-# PROCESSAR DADOS DO WS
+# ANALISA 1 ATIVO
 # ===============================
-def process_data(data):
-    try:
-        market_data = json.loads(data)
+def analisar_ativo(ativo):
+    # Ignora OTC se não estiver ativo
+    if ativo in ATIVOS_OTC and not otc_ativo():
+        print(f"{ativo} OTC fechado, ignorando")
+        return None
 
-        if "tick" in market_data:
-            tick = market_data["tick"]
-            ativo = tick.get("symbol", "Desconhecido")
-            price = tick["quote"]
-            timestamp = tick["epoch"]
-            dt = datetime.fromtimestamp(timestamp, tz=BR_TZ)
-            
-            print(f"[{dt.strftime('%H:%M:%S')}] {ativo} | Tick: {price}")
+    candles = pegar_candles(ativo)
+    direcao = direcao_candle(candles[-1])
+    conf = calcular_confianca(candles)
+    horario_entrada = proxima_vela_horario()
 
-            sinal_em_analise.set()
-            last_price = getattr(process_data, f"last_price_{ativo}", None)
-
-            if last_price:
-                diff = price - last_price
-                confianca = 50  # Simulação de confiança leve
-                prob = 50       # Simulação de probabilidade leve
-
-                # Checa se ativo é OTC e se está ativo
-                if ativo in ATIVOS_OTC and not otc_ativo():
-                    print(f"{ativo} OTC fechado, ignorando tick")
-                else:
-                    if confianca >= CONF_MIN and prob >= PROB_MIN:
-                        sinal = "CALL" if diff > 0 else "PUT"
-                        message = f"SINAL GERADO: {ativo} | {sinal} | Conf: {confianca}% | Prob: {prob}% | Preço: {price}"
-                        print(message)
-                        send_telegram(message)
-                    else:
-                        print(f"Descartado: Conf={confianca}% Prob={prob}%")
-            
-            setattr(process_data, f"last_price_{ativo}", price)
-            sinal_em_analise.clear()
-
-    except Exception as e:
-        print(f"[Erro processamento] {e}")
+    if conf >= CONF_MIN:
+        tg(f"💥 <b>SINAL ENCONTRADO!</b>\n"
+           f"📊 <b>Ativo:</b> {ativo}\n"
+           f"🎯 <b>Direção:</b> {direcao}\n"
+           f"⏱️ <b>Timeframe:</b> 1M\n"
+           f"🧠 <b>Estratégia:</b> {ESTRATEGIA}\n"
+           f"🚀 <b>Entrada:</b> {horario_entrada}\n"
+           f"📈 <b>Confiança:</b> {conf}%")
+        return {"ativo": ativo, "direcao": direcao, "horario_entrada": horario_entrada}
+    return None
 
 # ===============================
-# INICIAR WEBSOCKET
+# RESULTADO REAL
 # ===============================
-def start_ws():
-    global bot_iniciado
+def resultado_real(ativo, direcao):
+    candles = pegar_candles(ativo, count=1)
+    candle = candles[-1]
+    direcao_real = direcao_candle(candle)
+    if direcao_real == direcao:
+        return "💸 Green"
+    else:
+        return "🧨 Red"
+
+# ===============================
+# LOOP PRINCIPAL
+# ===============================
+def loop_ativos():
+    todos_ativos = ATIVOS_FOREX + ATIVOS_OTC
+    tg("🤖 Troia V19 PRO FINAL - Painel Profissional iniciado.\nAnalise 1 ativo por vez.")
     while True:
-        try:
-            ws = websocket.WebSocketApp(
-                DERIV_WS_URL,
-                on_open=lambda ws: print("[WS] Conectado com sucesso."),
-                on_message=lambda ws, msg: process_data(msg),
-                on_error=lambda ws, err: print(f"[WS ERRO] {err}"),
-                on_close=lambda ws, code, msg: print("[WS] Fechado, reconectando...")
-            )
-
-            if not bot_iniciado:
-                send_telegram("🤖 Troia-V16 iniciado ✅")
-                bot_iniciado = True
-
-            ws.run_forever()
-        except Exception as e:
-            print(f"[WS EXCEPTION] {e}")
-        print(f"Reconectando em {RECONNECT_DELAY}s...")
-        time.sleep(RECONNECT_DELAY)
+        for ativo in todos_ativos:
+            try:
+                res = analisar_ativo(ativo)
+                if res:
+                    time.sleep(WAIT_AFTER_VELA)  # espera fechamento vela
+                    resultado = resultado_real(res["ativo"], res["direcao"])
+                    tg(f"🧾 <b>RESULTADO SINAL</b>\n"
+                       f"📊 <b>Ativo:</b> {res['ativo']}\n"
+                       f"🎯 <b>Direção:</b> {res['direcao']}\n"
+                       f"⏱️ <b>Entrada realizada:</b> {res['horario_entrada']}\n"
+                       f"✅ <b>Resultado:</b> {resultado}")
+                else:
+                    time.sleep(2)
+            except Exception as e:
+                tg(f"❌ Erro no ativo {ativo}: {e}")
+                time.sleep(RECONNECT_DELAY)
 
 # ===============================
-# INICIALIZAÇÃO
+# START
 # ===============================
 if __name__ == "__main__":
-    print("=== Troia-V16 ONLINE ===")
-    t = threading.Thread(target=start_ws)
-    t.start()
+    loop_ativos()
