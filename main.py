@@ -14,14 +14,14 @@ ATIVOS_FOREX = ["frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD","frxUSDCAD","frx
 ATIVOS_OTC = ["OTC_US500","OTC_US30","OTC_DE30","OTC_FRA40","OTC_FTI100","OTC_AUS200","OTC_JPN225"]
 
 NUM_CANDLES_ANALISE = 20
-TIMEFRAME = 60  # segundos
+TIMEFRAME = 60
 CONF_MIN = 55
 WAIT_BUFFER = 5
 ESTRATEGIA = "Análise últimos 20 candles 1M"
 BR_TZ = timezone(timedelta(hours=-3))
 HIST_FILE = "historico_sinais.json"
-RECONNECT_DELAY = 5
-HEARTBEAT_INTERVAL = 30  # segundos
+HEARTBEAT_INTERVAL = 30
+RETRY_LIMIT = 5
 
 # ===============================
 # TELEGRAM
@@ -58,53 +58,75 @@ def calcular_confianca(candles):
     call = sum(1 for c in candles if c["close"] > c["open"])
     put = sum(1 for c in candles if c["close"] < c["open"])
     total = len(candles)
-    maior = max(call, put)
-    return int(maior / total * 100)
+    return int(max(call, put) / total * 100) if total else 0
 
 # ===============================
-# PEGAR CANDLES COM RETRY
+# WEBSOCKET
 # ===============================
-def pegar_candles_ws(ws, ativo, count=NUM_CANDLES_ANALISE, max_retries=5):
-    for tentativa in range(max_retries):
+def criar_ws():
+    for i in range(RETRY_LIMIT):
         try:
-            end_timestamp = int(time.time())
-            ws.send(json.dumps({
-                "ticks_history": ativo,
-                "style": "candles",
-                "granularity": TIMEFRAME,
-                "count": count,
-                "end": end_timestamp
-            }))
-            data = json.loads(ws.recv())
-            if "candles" in data:
-                return data["candles"][-count:]
-            else:
-                print(f"⚠️ Dados incompletos para {ativo}, tentativa {tentativa+1}")
-                time.sleep(2 ** tentativa)
+            ws = websocket.create_connection(
+                "wss://ws.derivws.com/websockets/v3?app_id=1089",
+                timeout=10
+            )
+            ws.send(json.dumps({"authorize": DERIV_API_KEY}))
+            return ws
         except Exception as e:
-            wait = 2 ** tentativa
-            print(f"❌ Erro pegar_candles({ativo}): {e}, tentando novamente em {wait}s")
+            wait = 2 ** i
+            print(f"❌ Erro conectar WS ({i+1}/{RETRY_LIMIT}): {e}, tentando em {wait}s")
             time.sleep(wait)
-    print(f"⚠️ Falha ao pegar candles de {ativo} após {max_retries} tentativas")
     return None
 
-# ===============================
-# HEARTBEAT PARA WEBSOCKET
-# ===============================
 def manter_conexao_viva(ws):
     while True:
         try:
             ws.send(json.dumps({"ping": 1}))
         except Exception as e:
-            print(f"❌ Erro heartbeat WebSocket: {e}")
+            print(f"❌ Erro heartbeat WS: {e}")
             break
         time.sleep(HEARTBEAT_INTERVAL)
 
 # ===============================
-# CHECAR OTC
+# CANDLES
 # ===============================
-def otc_ativo():
-    return True  # Placeholder
+def pegar_candles_ws(ws, ativo, count=NUM_CANDLES_ANALISE):
+    for tentativa in range(RETRY_LIMIT):
+        try:
+            ws.send(json.dumps({
+                "ticks_history": ativo,
+                "style": "candles",
+                "granularity": TIMEFRAME,
+                "count": count,
+                "end": int(time.time())
+            }))
+            resp = json.loads(ws.recv())
+            if "candles" in resp:
+                return resp["candles"][-count:]
+        except Exception as e:
+            wait = 2 ** tentativa
+            print(f"❌ Erro pegar_candles({ativo}): {e}, tentando em {wait}s")
+            time.sleep(wait)
+    return None
+
+# ===============================
+# MERCADO ABERTO
+# ===============================
+def mercado_aberto(ativo):
+    ws = criar_ws()
+    if not ws:
+        return False
+    try:
+        ws.send(json.dumps({"active_symbols": "brief"}))
+        resp = json.loads(ws.recv())
+        ws.close()
+        if "active_symbols" in resp:
+            for s in resp["active_symbols"]:
+                if s["symbol"] == ativo:
+                    return s.get("market_status") == "open"
+    except Exception as e:
+        print(f"❌ Erro verificar mercado aberto {ativo}: {e}")
+    return False
 
 # ===============================
 # HISTÓRICO
@@ -131,72 +153,96 @@ def registrar_historico(ativo, direcao, conf, horario, resultado):
         json.dump(historico, f, indent=4)
 
 # ===============================
-# LOOP POR ATIVO (THREAD)
+# ESTATÍSTICAS
 # ===============================
-def loop_ativo(ativo):
-    try:
-        ws = websocket.create_connection(
-            "wss://ws.derivws.com/websockets/v3?app_id=1089",
-            timeout=20
-        )
-        ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-    except Exception as e:
-        print(f"❌ Falha ao iniciar WebSocket para {ativo}: {e}")
-        return
+def calcular_estatisticas():
+    stats = {}
+    if os.path.exists(HIST_FILE):
+        with open(HIST_FILE, "r") as f:
+            try:
+                historico = json.load(f)
+            except:
+                historico = []
+        for entry in historico:
+            ativo = entry["ativo"]
+            resultado = entry["resultado"]
+            if ativo not in stats:
+                stats[ativo] = {"Green":0,"Red":0}
+            if "Green" in resultado:
+                stats[ativo]["Green"] +=1
+            elif "Red" in resultado:
+                stats[ativo]["Red"] +=1
+    return stats
 
-    # Inicia heartbeat em thread separada
+def enviar_estatisticas():
+    stats = calcular_estatisticas()
+    msg = "📊 <b>Estatísticas de Acerto por Ativo</b>\n\n"
+    for ativo, data in stats.items():
+        total = data["Green"] + data["Red"]
+        if total == 0:
+            continue
+        pct = int(data["Green"]/total*100)
+        msg += f"{ativo}: {data['Green']}💸 / {data['Red']}🧨 → {pct}% Green\n"
+    tg_send(msg)
+
+# ===============================
+# LOOP AVANÇADO
+# ===============================
+def loop_ativos(ativos):
+    ws = criar_ws()
+    if not ws:
+        return
     Thread(target=manter_conexao_viva, args=(ws,), daemon=True).start()
 
     while True:
-        if ativo in ATIVOS_OTC and not otc_ativo():
-            time.sleep(5)
-            continue
+        for ativo in ativos:
+            if ativo in ATIVOS_OTC and not mercado_aberto(ativo):
+                continue
 
-        candles = pegar_candles_ws(ws, ativo)
-        if not candles:
-            time.sleep(5)
-            continue
+            candles = pegar_candles_ws(ws, ativo)
+            if not candles:
+                continue
 
-        direcao = direcao_candle(candles[-1])
-        conf = calcular_confianca(candles)
-        horario_entrada = datetime.now(BR_TZ).strftime("%H:%M:%S")
+            direcao = direcao_candle(candles[-1])
+            conf = calcular_confianca(candles)
+            horario_entrada = datetime.now(BR_TZ).strftime("%H:%M:%S")
 
-        if conf >= CONF_MIN:
-            msg = (f"💥 <b>SINAL PARA PRÓXIMA VELA!</b>\n"
-                   f"📊 <b>Ativo:</b> {ativo}\n"
-                   f"🎯 <b>Direção:</b> {direcao}\n"
-                   f"⏱️ <b>Entrada:</b> próxima vela\n"
-                   f"🧠 <b>Estratégia:</b> {ESTRATEGIA}\n"
-                   f"📈 <b>Confiança:</b> {conf}%\n\n"
-                   f"⌛ Aguardando fechamento da próxima vela...")
-            message_id = tg_send(msg)
+            if conf >= CONF_MIN:
+                msg = (f"💥 <b>SINAL PARA PRÓXIMA VELA!</b>\n"
+                       f"📊 <b>Ativo:</b> {ativo}\n"
+                       f"🎯 <b>Direção:</b> {direcao}\n"
+                       f"⏱️ <b>Entrada:</b> próxima vela\n"
+                       f"🧠 <b>Estratégia:</b> {ESTRATEGIA}\n"
+                       f"📈 <b>Confiança:</b> {conf}%\n\n"
+                       f"⌛ Aguardando fechamento da próxima vela...")
+                message_id = tg_send(msg)
 
-            time.sleep(TIMEFRAME + WAIT_BUFFER)
+                time.sleep(TIMEFRAME + WAIT_BUFFER)
 
-            candle_proxima = pegar_candles_ws(ws, ativo, count=1)
-            if candle_proxima:
-                candle_proxima = candle_proxima[-1]
-                resultado = "💸 Green" if direcao_candle(candle_proxima) == direcao else "🧨 Red"
-            else:
-                resultado = "⚠️ Sem dados"
+                candle_proxima = pegar_candles_ws(ws, ativo, count=1)
+                if candle_proxima:
+                    candle_proxima = candle_proxima[-1]
+                    resultado = "💸 Green" if direcao_candle(candle_proxima) == direcao else "🧨 Red"
+                else:
+                    resultado = "⚠️ Sem dados"
 
-            msg_edit = msg.replace("⌛ Aguardando fechamento da próxima vela...", f"✅ Resultado: {resultado}")
-            tg_edit(message_id, msg_edit)
+                msg_edit = msg.replace("⌛ Aguardando fechamento da próxima vela...", f"✅ Resultado: {resultado}")
+                tg_edit(message_id, msg_edit)
 
-            registrar_historico(ativo, direcao, conf, horario_entrada, resultado)
+                registrar_historico(ativo, direcao, conf, horario_entrada, resultado)
 
+        # Atualiza estatísticas a cada 5 sinais
+        enviar_estatisticas()
         time.sleep(1)
 
 # ===============================
 # START
 # ===============================
 if __name__ == "__main__":
-    todos_ativos = ATIVOS_FOREX + ATIVOS_OTC
-    tg_send("🤖 Troia V19 PRO FINAL iniciado - Analisando todos os ativos continuamente (sinal para próxima vela).")
+    tg_send("🤖 Troia V19 FINAL PROFISSIONAL iniciado - Monitorando Forex e OTC!")
 
-    for i, ativo in enumerate(todos_ativos):
-        Thread(target=loop_ativo, args=(ativo,), daemon=True).start()
-        time.sleep(1)  # evita iniciar todas threads ao mesmo tempo
+    Thread(target=loop_ativos, args=(ATIVOS_FOREX,), daemon=True).start()
+    Thread(target=loop_ativos, args=(ATIVOS_OTC,), daemon=True).start()
 
     while True:
         time.sleep(10)
