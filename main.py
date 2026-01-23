@@ -7,7 +7,7 @@ import os
 # CONFIGURAÇÃO
 # ===============================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
-TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ITRHTdVU"
+TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 ATIVOS_FOREX = ["frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD","frxUSDCAD","frxUSDCHF","frxNZDUSD","frxEURGBP"]
@@ -16,12 +16,12 @@ ATIVOS_OTC = ["OTC_US500","OTC_US30","OTC_DE30","OTC_FRA40","OTC_FTI100","OTC_AU
 NUM_CANDLES_ANALISE = 20
 TIMEFRAME = 60  # segundos
 CONF_MIN = 55
-WAIT_BUFFER = 5  # espera extra para garantir fechamento da vela
+WAIT_BUFFER = 5
 ESTRATEGIA = "Análise últimos 20 candles 1M"
-RECONNECT_DELAY = 3
 BR_TZ = timezone(timedelta(hours=-3))
-
 HIST_FILE = "historico_sinais.json"
+RECONNECT_DELAY = 5
+HEARTBEAT_INTERVAL = 30  # segundos
 
 # ===============================
 # TELEGRAM
@@ -62,13 +62,11 @@ def calcular_confianca(candles):
     return int(maior / total * 100)
 
 # ===============================
-# PEGAR CANDLES
+# PEGAR CANDLES COM RETRY
 # ===============================
-def pegar_candles(ativo, count=NUM_CANDLES_ANALISE):
-    while True:
+def pegar_candles_ws(ws, ativo, count=NUM_CANDLES_ANALISE, max_retries=5):
+    for tentativa in range(max_retries):
         try:
-            ws = websocket.create_connection("wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=10)
-            ws.send(json.dumps({"authorize": DERIV_API_KEY}))
             end_timestamp = int(time.time())
             ws.send(json.dumps({
                 "ticks_history": ativo,
@@ -78,21 +76,35 @@ def pegar_candles(ativo, count=NUM_CANDLES_ANALISE):
                 "end": end_timestamp
             }))
             data = json.loads(ws.recv())
-            ws.close()
             if "candles" in data:
                 return data["candles"][-count:]
             else:
-                print(f"⚠️ Dados incompletos para {ativo}, tentando novamente")
-                time.sleep(RECONNECT_DELAY)
+                print(f"⚠️ Dados incompletos para {ativo}, tentativa {tentativa+1}")
+                time.sleep(2 ** tentativa)
         except Exception as e:
-            print(f"❌ Erro pegar_candles({ativo}): {e}")
-            time.sleep(RECONNECT_DELAY)
+            wait = 2 ** tentativa
+            print(f"❌ Erro pegar_candles({ativo}): {e}, tentando novamente em {wait}s")
+            time.sleep(wait)
+    print(f"⚠️ Falha ao pegar candles de {ativo} após {max_retries} tentativas")
+    return None
+
+# ===============================
+# HEARTBEAT PARA WEBSOCKET
+# ===============================
+def manter_conexao_viva(ws):
+    while True:
+        try:
+            ws.send(json.dumps({"ping": 1}))
+        except Exception as e:
+            print(f"❌ Erro heartbeat WebSocket: {e}")
+            break
+        time.sleep(HEARTBEAT_INTERVAL)
 
 # ===============================
 # CHECAR OTC
 # ===============================
 def otc_ativo():
-    return True
+    return True  # Placeholder
 
 # ===============================
 # HISTÓRICO
@@ -122,18 +134,33 @@ def registrar_historico(ativo, direcao, conf, horario, resultado):
 # LOOP POR ATIVO (THREAD)
 # ===============================
 def loop_ativo(ativo):
+    try:
+        ws = websocket.create_connection(
+            "wss://ws.derivws.com/websockets/v3?app_id=1089",
+            timeout=20
+        )
+        ws.send(json.dumps({"authorize": DERIV_API_KEY}))
+    except Exception as e:
+        print(f"❌ Falha ao iniciar WebSocket para {ativo}: {e}")
+        return
+
+    # Inicia heartbeat em thread separada
+    Thread(target=manter_conexao_viva, args=(ws,), daemon=True).start()
+
     while True:
         if ativo in ATIVOS_OTC and not otc_ativo():
             time.sleep(5)
             continue
 
-        # Pega candles atuais
-        candles = pegar_candles(ativo)
+        candles = pegar_candles_ws(ws, ativo)
+        if not candles:
+            time.sleep(5)
+            continue
+
         direcao = direcao_candle(candles[-1])
         conf = calcular_confianca(candles)
         horario_entrada = datetime.now(BR_TZ).strftime("%H:%M:%S")
 
-        # Sinal para próxima vela
         if conf >= CONF_MIN:
             msg = (f"💥 <b>SINAL PARA PRÓXIMA VELA!</b>\n"
                    f"📊 <b>Ativo:</b> {ativo}\n"
@@ -144,14 +171,15 @@ def loop_ativo(ativo):
                    f"⌛ Aguardando fechamento da próxima vela...")
             message_id = tg_send(msg)
 
-            # Espera fechamento da próxima vela
             time.sleep(TIMEFRAME + WAIT_BUFFER)
 
-            # Pega o candle da próxima vela
-            candle_proxima = pegar_candles(ativo, count=1)[-1]
-            resultado = "💸 Green" if direcao_candle(candle_proxima) == direcao else "🧨 Red"
+            candle_proxima = pegar_candles_ws(ws, ativo, count=1)
+            if candle_proxima:
+                candle_proxima = candle_proxima[-1]
+                resultado = "💸 Green" if direcao_candle(candle_proxima) == direcao else "🧨 Red"
+            else:
+                resultado = "⚠️ Sem dados"
 
-            # Edita a mensagem com resultado
             msg_edit = msg.replace("⌛ Aguardando fechamento da próxima vela...", f"✅ Resultado: {resultado}")
             tg_edit(message_id, msg_edit)
 
@@ -166,8 +194,9 @@ if __name__ == "__main__":
     todos_ativos = ATIVOS_FOREX + ATIVOS_OTC
     tg_send("🤖 Troia V19 PRO FINAL iniciado - Analisando todos os ativos continuamente (sinal para próxima vela).")
 
-    for ativo in todos_ativos:
+    for i, ativo in enumerate(todos_ativos):
         Thread(target=loop_ativo, args=(ativo,), daemon=True).start()
+        time.sleep(1)  # evita iniciar todas threads ao mesmo tempo
 
     while True:
         time.sleep(10)
