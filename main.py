@@ -6,7 +6,6 @@ import threading
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import os
-import sys
 
 # ===============================
 # CONFIGURAÇÃO
@@ -17,7 +16,7 @@ DERIV_API_KEY = "UEISANwBEI9sPVR"
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
-TIMEFRAME = 60  # 🔥 M1
+TIMEFRAME = 60  # M1
 BR_TZ = timezone(timedelta(hours=-3))
 PORT = int(os.environ.get("PORT", 8080))
 
@@ -27,7 +26,7 @@ ATIVOS = [
 ]
 
 # ===============================
-# ESTADO GLOBAL
+# ESTADO
 # ===============================
 bot_iniciado = False
 ws_ativo = False
@@ -40,9 +39,8 @@ dados_sinal = {}
 ultimo_epoch = None
 
 modo = "CONSERVADOR"
-
 ultimo_sinal_por_ativo = {}
-COOLDOWN_ATIVO = 120  # 2 min
+COOLDOWN_ATIVO = 120  # 2 minutos
 
 # ===============================
 # TELEGRAM
@@ -67,17 +65,17 @@ def iniciar_bot():
 
     hora = datetime.now(BR_TZ).strftime("%d/%m %H:%M")
     send_telegram(
-        f"🤖 <b>Troia-IA V16.4 ONLINE</b>\n"
+        f"🤖 <b>Troia-IA V16.5 ONLINE</b>\n"
         f"⏱️ M1 | Mercado REAL\n"
         f"📊 Ativos: {len(ATIVOS)}\n"
         f"🕒 {hora} (BR)"
     )
 
-    # 🔍 SINAL DE TESTE
+    # Sinal teste
     send_telegram(
-        "🧪 <b>ANÁLISE DE TESTE</b>\n"
-        "Bot inicializado com sucesso.\n"
-        "Aguardando oportunidade real de mercado."
+        "🧪 <b>SINAL TESTE</b>\n"
+        "📌 Sistema operacional\n"
+        "⏳ Aguardando candle real M1"
     )
 
     bot_iniciado = True
@@ -104,6 +102,7 @@ def processar_candle(candles):
     global sinal_aberto, dados_sinal, modo
 
     c = candles[-1]
+    agora = time.time()
 
     # ===== RESULTADO =====
     if sinal_aberto:
@@ -126,8 +125,7 @@ def processar_candle(candles):
         avancar_ativo()
         return
 
-    # ===== COOLDOWN POR ATIVO =====
-    agora = time.time()
+    # ===== COOLDOWN =====
     ultimo = ultimo_sinal_por_ativo.get(ativo_atual, 0)
     if agora - ultimo < COOLDOWN_ATIVO:
         avancar_ativo()
@@ -137,7 +135,7 @@ def processar_candle(candles):
     direcao = analisar(candles)
     if direcao:
         sinal_aberto = True
-        dados_sinal = {"direcao": direcao}
+        dados_sinal["direcao"] = direcao
         ultimo_sinal_por_ativo[ativo_atual] = agora
 
         hora = datetime.now(BR_TZ).strftime("%H:%M")
@@ -152,29 +150,23 @@ def processar_candle(candles):
 
     avancar_ativo()
 
-# ===============================
-# ROTACAO DE ATIVOS (SAFE)
-# ===============================
 def avancar_ativo():
     global ativo_index, ativo_atual
     ativo_index = (ativo_index + 1) % len(ATIVOS)
     ativo_atual = ATIVOS[ativo_index]
-
     threading.Timer(0.5, solicitar_candles).start()
 
 # ===============================
-# WS
+# WEBSOCKET
 # ===============================
 def solicitar_candles():
-    if not ws_ativo:
-        return
-
-    ws.send(json.dumps({
-        "ticks_history": ativo_atual,
-        "style": "candles",
-        "granularity": TIMEFRAME,
-        "count": 10
-    }))
+    if ws:
+        ws.send(json.dumps({
+            "ticks_history": ativo_atual,
+            "style": "candles",
+            "granularity": TIMEFRAME,
+            "count": 10
+        }))
 
 def on_message(ws_, msg):
     global ultimo_epoch
@@ -202,13 +194,13 @@ def on_open(ws_):
     iniciar_bot()
     solicitar_candles()
 
+def on_error(ws_, err):
+    print("WS ERRO:", err)
+
 def on_close(ws_, *a):
     global ws_ativo
     ws_ativo = False
-    send_telegram("⚠️ WebSocket desconectado. Reconectando...")
-
-def on_error(ws_, err):
-    print("WS ERRO:", err)
+    print("WS fechado, reconectando...")
 
 # ===============================
 # LOOP WS
@@ -216,7 +208,6 @@ def on_error(ws_, err):
 def ws_loop():
     while True:
         try:
-            websocket.enableTrace(False)
             websocket.WebSocketApp(
                 DERIV_WS_URL,
                 on_open=on_open,
@@ -228,22 +219,21 @@ def ws_loop():
             time.sleep(5)
 
 # ===============================
-# WATCHDOG (RAILWAY SAFE)
+# LOG VIVO
 # ===============================
-def watchdog():
+def log_vivo():
     while True:
+        print("Troia-IA rodando...")
         time.sleep(60)
-        if not ws_ativo:
-            os._exit(1)
 
 # ===============================
-# HTTP HEALTHCHECK
+# HTTP
 # ===============================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"TROIA-IA V16.4 ONLINE")
+        self.wfile.write(b"TROIA-IA V16.5 ONLINE")
 
 def iniciar_http():
     HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
@@ -252,6 +242,7 @@ def iniciar_http():
 # MAIN
 # ===============================
 if __name__ == "__main__":
+    ws = None
     threading.Thread(target=iniciar_http, daemon=True).start()
-    threading.Thread(target=watchdog, daemon=True).start()
+    threading.Thread(target=log_vivo, daemon=True).start()
     ws_loop()
