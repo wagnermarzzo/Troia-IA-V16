@@ -6,7 +6,6 @@ import threading
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import os
-import sys
 
 # ===============================
 # CONFIGURAÇÃO
@@ -27,13 +26,14 @@ ATIVOS = [
 ]
 
 # ===============================
-# ESTADO GLOBAL
+# ESTADO
 # ===============================
 bot_iniciado = False
 ws_ativo = False
+ws = None
 
 ativo_index = 0
-ativo_atual = ATIVOS[ativo_index]
+ativo_atual = ATIVOS[0]
 
 sinal_aberto = False
 dados_sinal = {}
@@ -60,12 +60,11 @@ def send_telegram(msg):
 def iniciar_bot():
     global bot_iniciado
     if not bot_iniciado:
-        hora = datetime.now(BR_TZ).strftime("%d/%m %H:%M")
         send_telegram(
             f"🤖 <b>Troia-IA V16.3 ONLINE</b>\n"
             f"⏱️ M3 | Mercado REAL\n"
             f"📊 Ativos: {len(ATIVOS)}\n"
-            f"🕒 {hora} (BR)"
+            f"🕒 {datetime.now(BR_TZ).strftime('%d/%m %H:%M')} (BR)"
         )
         bot_iniciado = True
 
@@ -73,9 +72,6 @@ def iniciar_bot():
 # ESTRATÉGIA
 # ===============================
 def analisar(candles):
-    if len(candles) < 3:
-        return None
-
     c = candles[-1]
     corpo = abs(c["close"] - c["open"])
 
@@ -87,12 +83,18 @@ def analisar(candles):
 # ===============================
 # PROCESSAMENTO
 # ===============================
+def avancar_ativo():
+    global ativo_index, ativo_atual
+    ativo_index = (ativo_index + 1) % len(ATIVOS)
+    ativo_atual = ATIVOS[ativo_index]
+    time.sleep(1)
+    solicitar_candles()
+
 def processar_candle(candles):
-    global sinal_aberto, dados_sinal, modo, ativo_index, ativo_atual
+    global sinal_aberto, dados_sinal, modo
 
     c = candles[-1]
 
-    # ===== RESULTADO =====
     if sinal_aberto:
         green = (
             (dados_sinal["direcao"] == "CALL" and c["close"] > c["open"]) or
@@ -109,47 +111,35 @@ def processar_candle(candles):
         modo = "AGRESSIVO" if green else "CONSERVADOR"
         sinal_aberto = False
         dados_sinal = {}
-
         avancar_ativo()
         return
 
-    # ===== NOVO SINAL =====
     direcao = analisar(candles)
     if direcao:
         sinal_aberto = True
         dados_sinal = {"direcao": direcao}
-
-        hora = datetime.now(BR_TZ).strftime("%H:%M")
         send_telegram(
             f"📊 <b>SINAL M3</b>\n"
             f"📌 {ativo_atual}\n"
             f"🎯 <b>{direcao}</b>\n"
-            f"🕒 {hora}\n"
+            f"🕒 {datetime.now(BR_TZ).strftime('%H:%M')}\n"
             f"⚙️ Modo: {modo}"
         )
         return
 
-    # sem sinal → próximo ativo
     avancar_ativo()
-
-def avancar_ativo():
-    global ativo_index, ativo_atual
-    ativo_index = (ativo_index + 1) % len(ATIVOS)
-    ativo_atual = ATIVOS[ativo_index]
-
-    time.sleep(0.5)
-    solicitar_candles()
 
 # ===============================
 # WS
 # ===============================
 def solicitar_candles():
-    ws.send(json.dumps({
-        "ticks_history": ativo_atual,
-        "style": "candles",
-        "granularity": TIMEFRAME,
-        "count": 10
-    }))
+    if ws:
+        ws.send(json.dumps({
+            "ticks_history": ativo_atual,
+            "style": "candles",
+            "granularity": TIMEFRAME,
+            "count": 10
+        }))
 
 def on_message(ws_, msg):
     global ultimo_epoch
@@ -177,9 +167,6 @@ def on_open(ws_):
     iniciar_bot()
     solicitar_candles()
 
-def on_error(ws_, err):
-    print("WS ERRO:", err)
-
 def on_close(ws_, *a):
     global ws_ativo
     ws_ativo = False
@@ -192,25 +179,22 @@ def ws_loop():
     while True:
         try:
             websocket.enableTrace(False)
-            ws_app = websocket.WebSocketApp(
+            app = websocket.WebSocketApp(
                 DERIV_WS_URL,
                 on_open=on_open,
                 on_message=on_message,
-                on_error=on_error,
                 on_close=on_close
             )
-            ws_app.run_forever(ping_interval=30, ping_timeout=10)
+            app.run_forever(ping_interval=30, ping_timeout=10)
         except:
             time.sleep(5)
 
 # ===============================
-# WATCHDOG
+# WATCHDOG SAFE
 # ===============================
 def watchdog():
     while True:
-        if not ws_ativo:
-            send_telegram("⚠️ WebSocket inativo. Reiniciando serviço...")
-            os._exit(1)
+        print("💓 Bot vivo", datetime.now(BR_TZ).strftime("%H:%M:%S"))
         time.sleep(60)
 
 # ===============================
