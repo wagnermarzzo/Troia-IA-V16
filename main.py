@@ -30,11 +30,16 @@ ATIVOS = [
 # ESTADO GLOBAL
 # ===============================
 bot_iniciado = False
+ws_ativo = False
+
+ativo_index = 0
+ativo_atual = ATIVOS[ativo_index]
+
 sinal_aberto = False
 dados_sinal = {}
-ultimo_candle = {}
+ultimo_epoch = None
+
 modo = "CONSERVADOR"
-ws_ativo = False
 
 # ===============================
 # TELEGRAM
@@ -57,7 +62,7 @@ def iniciar_bot():
     if not bot_iniciado:
         hora = datetime.now(BR_TZ).strftime("%d/%m %H:%M")
         send_telegram(
-            f"🤖 <b>Troia-IA V16.2 ONLINE</b>\n"
+            f"🤖 <b>Troia-IA V16.3 ONLINE</b>\n"
             f"⏱️ M3 | Mercado REAL\n"
             f"📊 Ativos: {len(ATIVOS)}\n"
             f"🕒 {hora} (BR)"
@@ -72,23 +77,23 @@ def analisar(candles):
         return None
 
     c = candles[-1]
-    direcao = "CALL" if c["close"] > c["open"] else "PUT"
-
     corpo = abs(c["close"] - c["open"])
+
     if modo == "CONSERVADOR" and corpo < 0.00005:
         return None
 
-    return direcao
+    return "CALL" if c["close"] > c["open"] else "PUT"
 
 # ===============================
-# FECHAMENTO DE CANDLE
+# PROCESSAMENTO
 # ===============================
-def processar_candle(ativo, candles):
-    global sinal_aberto, dados_sinal, modo
+def processar_candle(candles):
+    global sinal_aberto, dados_sinal, modo, ativo_index, ativo_atual
+
+    c = candles[-1]
 
     # ===== RESULTADO =====
     if sinal_aberto:
-        c = candles[-1]
         green = (
             (dados_sinal["direcao"] == "CALL" and c["close"] > c["open"]) or
             (dados_sinal["direcao"] == "PUT" and c["close"] < c["open"])
@@ -96,7 +101,7 @@ def processar_candle(ativo, candles):
 
         send_telegram(
             f"{'🟢' if green else '🔴'} <b>RESULTADO</b>\n"
-            f"📌 {ativo}\n"
+            f"📌 {ativo_atual}\n"
             f"🎯 {dados_sinal['direcao']}\n"
             f"📊 <b>{'GREEN' if green else 'RED'}</b>"
         )
@@ -104,89 +109,102 @@ def processar_candle(ativo, candles):
         modo = "AGRESSIVO" if green else "CONSERVADOR"
         sinal_aberto = False
         dados_sinal = {}
+
+        avancar_ativo()
         return
 
     # ===== NOVO SINAL =====
     direcao = analisar(candles)
-    if not direcao:
+    if direcao:
+        sinal_aberto = True
+        dados_sinal = {"direcao": direcao}
+
+        hora = datetime.now(BR_TZ).strftime("%H:%M")
+        send_telegram(
+            f"📊 <b>SINAL M3</b>\n"
+            f"📌 {ativo_atual}\n"
+            f"🎯 <b>{direcao}</b>\n"
+            f"🕒 {hora}\n"
+            f"⚙️ Modo: {modo}"
+        )
         return
 
-    sinal_aberto = True
-    dados_sinal = {"direcao": direcao}
+    # sem sinal → próximo ativo
+    avancar_ativo()
 
-    hora = datetime.now(BR_TZ).strftime("%H:%M")
-    send_telegram(
-        f"📊 <b>SINAL M3</b>\n"
-        f"📌 {ativo}\n"
-        f"🎯 <b>{direcao}</b>\n"
-        f"🕒 {hora}\n"
-        f"⚙️ Modo: {modo}"
-    )
+def avancar_ativo():
+    global ativo_index, ativo_atual
+    ativo_index = (ativo_index + 1) % len(ATIVOS)
+    ativo_atual = ATIVOS[ativo_index]
+
+    time.sleep(0.5)
+    solicitar_candles()
 
 # ===============================
-# WEBSOCKET
+# WS
 # ===============================
-def on_message(ws, msg):
+def solicitar_candles():
+    ws.send(json.dumps({
+        "ticks_history": ativo_atual,
+        "style": "candles",
+        "granularity": TIMEFRAME,
+        "count": 10
+    }))
+
+def on_message(ws_, msg):
+    global ultimo_epoch
     data = json.loads(msg)
+
     if "candles" not in data:
         return
 
-    ativo = data["echo_req"]["ticks_history"]
     candles = data["candles"]
-
     for c in candles:
         c["open"] = float(c["open"])
         c["close"] = float(c["close"])
 
     epoch = candles[-1]["epoch"]
-    if ultimo_candle.get(ativo) == epoch:
+    if epoch == ultimo_epoch:
         return
 
-    ultimo_candle[ativo] = epoch
-    processar_candle(ativo, candles)
+    ultimo_epoch = epoch
+    processar_candle(candles)
 
-def on_open(ws):
-    global ws_ativo
+def on_open(ws_):
+    global ws, ws_ativo
+    ws = ws_
     ws_ativo = True
     iniciar_bot()
+    solicitar_candles()
 
-    for ativo in ATIVOS:
-        ws.send(json.dumps({
-            "ticks_history": ativo,
-            "style": "candles",
-            "granularity": TIMEFRAME,
-            "count": 10
-        }))
-        time.sleep(0.25)
-
-def on_error(ws, err):
+def on_error(ws_, err):
     print("WS ERRO:", err)
 
-def on_close(ws, *args):
+def on_close(ws_, *a):
     global ws_ativo
     ws_ativo = False
-    send_telegram("⚠️ WebSocket desconectado. Tentando reconectar...")
+    send_telegram("⚠️ WebSocket caiu. Reconectando...")
 
 # ===============================
-# LOOP WS BLINDADO
+# LOOP WS
 # ===============================
 def ws_loop():
     while True:
         try:
-            ws = websocket.WebSocketApp(
+            websocket.enableTrace(False)
+            ws_app = websocket.WebSocketApp(
                 DERIV_WS_URL,
                 on_open=on_open,
                 on_message=on_message,
                 on_error=on_error,
                 on_close=on_close
             )
-            ws.run_forever(ping_interval=30, ping_timeout=10)
+            ws_app.run_forever(ping_interval=30, ping_timeout=10)
         except:
-            send_telegram("🚨 Falha crítica no WebSocket. Reiniciando...")
             time.sleep(5)
 
 # ===============================
-# WATCHDOG (RAILWAY)
+# WATCHDOG
 # ===============================
 def watchdog():
     while True:
@@ -196,13 +214,13 @@ def watchdog():
         time.sleep(60)
 
 # ===============================
-# HTTP KEEP ALIVE
+# HTTP
 # ===============================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"TROIA-IA V16.2 ONLINE")
+        self.wfile.write(b"TROIA-IA V16.3 ONLINE")
 
 def iniciar_http():
     HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
