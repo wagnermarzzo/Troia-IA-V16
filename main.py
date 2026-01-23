@@ -7,25 +7,18 @@ import os
 # CONFIGURAÇÃO
 # ===============================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
-TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
+TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
-ATIVOS_FOREX = [
-    "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxAUDUSD",
-    "frxUSDCAD", "frxUSDCHF", "frxNZDUSD", "frxEURGBP"
-]
-
-ATIVOS_OTC = [
-    "OTC_US500", "OTC_US30", "OTC_DE30", "OTC_FRA40",
-    "OTC_FTI100", "OTC_AUS200", "OTC_JPN225"
-]
+ATIVOS_FOREX = ["frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD","frxUSDCAD","frxUSDCHF","frxNZDUSD","frxEURGBP"]
+ATIVOS_OTC = ["OTC_US500","OTC_US30","OTC_DE30","OTC_FRA40","OTC_FTI100","OTC_AUS200","OTC_JPN225"]
 
 NUM_CANDLES_ANALISE = 20
-TIMEFRAME = 60  # 1 minuto
+TIMEFRAME = 60  # segundos
 CONF_MIN = 55
-WAIT_AFTER_VELA = 65  # espera 1m05s
+WAIT_BUFFER = 5  # espera extra para garantir fechamento da vela
 ESTRATEGIA = "Análise últimos 20 candles 1M"
-RECONNECT_DELAY = 3  # segundos caso WS caia
+RECONNECT_DELAY = 3
 BR_TZ = timezone(timedelta(hours=-3))
 
 HIST_FILE = "historico_sinais.json"
@@ -99,10 +92,10 @@ def pegar_candles(ativo, count=NUM_CANDLES_ANALISE):
 # CHECAR OTC
 # ===============================
 def otc_ativo():
-    return True  # ajustar depois se necessário
+    return True
 
 # ===============================
-# REGISTRAR HISTÓRICO
+# HISTÓRICO
 # ===============================
 def registrar_historico(ativo, direcao, conf, horario, resultado):
     historico = []
@@ -126,57 +119,55 @@ def registrar_historico(ativo, direcao, conf, horario, resultado):
         json.dump(historico, f, indent=4)
 
 # ===============================
-# ANALISAR E ENVIAR SINAL COM RESULTADO
+# LOOP POR ATIVO (THREAD)
 # ===============================
-def analisar_e_enviar(ativo):
-    if ativo in ATIVOS_OTC and not otc_ativo():
-        print(f"{ativo} OTC fechado, ignorando")
-        return
+def loop_ativo(ativo):
+    while True:
+        if ativo in ATIVOS_OTC and not otc_ativo():
+            time.sleep(5)
+            continue
 
-    candles = pegar_candles(ativo)
-    direcao = direcao_candle(candles[-1])
-    conf = calcular_confianca(candles)
-    horario_entrada = (datetime.now(BR_TZ) + timedelta(seconds=5)).strftime("%H:%M:%S")
+        # Pega candles atuais
+        candles = pegar_candles(ativo)
+        direcao = direcao_candle(candles[-1])
+        conf = calcular_confianca(candles)
+        horario_entrada = datetime.now(BR_TZ).strftime("%H:%M:%S")
 
-    if conf >= CONF_MIN:
-        msg = (f"💥 <b>SINAL ENCONTRADO!</b>\n"
-               f"📊 <b>Ativo:</b> {ativo}\n"
-               f"🎯 <b>Direção:</b> {direcao}\n"
-               f"⏱️ <b>Entrada:</b> {horario_entrada}\n"
-               f"🧠 <b>Estratégia:</b> {ESTRATEGIA}\n"
-               f"📈 <b>Confiança:</b> {conf}%\n\n"
-               f"⌛ Aguardando resultado...")
-        message_id = tg_send(msg)
+        # Sinal para próxima vela
+        if conf >= CONF_MIN:
+            msg = (f"💥 <b>SINAL PARA PRÓXIMA VELA!</b>\n"
+                   f"📊 <b>Ativo:</b> {ativo}\n"
+                   f"🎯 <b>Direção:</b> {direcao}\n"
+                   f"⏱️ <b>Entrada:</b> próxima vela\n"
+                   f"🧠 <b>Estratégia:</b> {ESTRATEGIA}\n"
+                   f"📈 <b>Confiança:</b> {conf}%\n\n"
+                   f"⌛ Aguardando fechamento da próxima vela...")
+            message_id = tg_send(msg)
 
-        time.sleep(WAIT_AFTER_VELA)
+            # Espera fechamento da próxima vela
+            time.sleep(TIMEFRAME + WAIT_BUFFER)
 
-        candle_final = pegar_candles(ativo, count=1)[-1]
-        resultado = "💸 Green" if direcao_candle(candle_final) == direcao else "🧨 Red"
+            # Pega o candle da próxima vela
+            candle_proxima = pegar_candles(ativo, count=1)[-1]
+            resultado = "💸 Green" if direcao_candle(candle_proxima) == direcao else "🧨 Red"
 
-        # Edita mensagem com resultado
-        msg_edit = msg.replace("⌛ Aguardando resultado...", f"✅ Resultado: {resultado}")
-        tg_edit(message_id, msg_edit)
+            # Edita a mensagem com resultado
+            msg_edit = msg.replace("⌛ Aguardando fechamento da próxima vela...", f"✅ Resultado: {resultado}")
+            tg_edit(message_id, msg_edit)
 
-        # Registra histórico
-        registrar_historico(ativo, direcao, conf, horario_entrada, resultado)
+            registrar_historico(ativo, direcao, conf, horario_entrada, resultado)
+
+        time.sleep(1)
 
 # ===============================
-# LOOP PRINCIPAL
+# START
 # ===============================
-def loop_ativos():
+if __name__ == "__main__":
     todos_ativos = ATIVOS_FOREX + ATIVOS_OTC
-    tg_send("🤖 Troia V19 PRO FINAL - Painel Profissional iniciado.\nAnalise múltiplos ativos em paralelo.")
+    tg_send("🤖 Troia V19 PRO FINAL iniciado - Analisando todos os ativos continuamente (sinal para próxima vela).")
+
+    for ativo in todos_ativos:
+        Thread(target=loop_ativo, args=(ativo,), daemon=True).start()
 
     while True:
-        threads = []
-        for ativo in todos_ativos:
-            t = Thread(target=analisar_e_enviar, args=(ativo,))
-            t.start()
-            threads.append(t)
-            time.sleep(1)
-
-        for t in threads:
-            t.join()
-
-if __name__ == "__main__":
-    loop_ativos()
+        time.sleep(10)
