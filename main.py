@@ -2,8 +2,8 @@ import websocket
 import json
 import time
 import requests
-from datetime import datetime, timezone, timedelta
 import threading
+from datetime import datetime, timezone, timedelta
 import os
 
 # ===============================
@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID = "-1003656750711"
 TIMEFRAME = 60  # M1
 BR_TZ = timezone(timedelta(hours=-3))
 
-# Ativos FOREX + OTC (OTC será usado automaticamente quando disponível)
+# Ativos FOREX + OTC
 ATIVOS_FOREX = [
     "frxEURUSD","frxGBPUSD","frxUSDJPY","frxAUDUSD","frxUSDCAD",
     "frxUSDCHF","frxEURJPY","frxGBPJPY","frxEURGBP","frxAUDJPY"
@@ -40,9 +40,11 @@ ultimo_epoch = None
 modo = "CONSERVADOR"
 ws = None
 cooldown_ativos = {}  # Epoch do último sinal por ativo
+bot_iniciado = False
+ultima_mensagem_heartbeat = 0
 
 # ===============================
-# FUNÇÕES TELEGRAM
+# TELEGRAM
 # ===============================
 def send_telegram(msg):
     try:
@@ -54,12 +56,20 @@ def send_telegram(msg):
     except:
         pass
 
+def heartbeat():
+    global ultima_mensagem_heartbeat
+    while True:
+        agora = time.time()
+        if agora - ultima_mensagem_heartbeat > 1800:  # 30 min
+            send_telegram("💓 Bot vivo | TROIA-IA M1")
+            ultima_mensagem_heartbeat = agora
+        time.sleep(60)
+
 # ===============================
 # MERCADO / ATIVOS
 # ===============================
 def mercado_atual():
     agora = datetime.now(BR_TZ)
-    # Sábado (5) e Domingo (6) → OTC
     return "OTC" if agora.weekday() >= 5 else "FOREX"
 
 def ativos_em_uso():
@@ -75,22 +85,21 @@ def atualizar_ativo():
 # INICIALIZAÇÃO
 # ===============================
 def iniciar_bot():
-    global ativo_atual
+    global bot_iniciado
     atualizar_ativo()
     hora = datetime.now(BR_TZ).strftime("%d/%m %H:%M")
-    send_telegram(
-        f"🤖 <b>TROIA-IA V18 ONLINE</b>\n"
-        f"⏱️ M1 | Mercado REAL\n"
-        f"🧭 Mercado: {mercado_atual()}\n"
-        f"📊 Ativos: {len(ativos_em_uso())}\n"
-        f"🕒 {hora} (BR)"
-    )
-    # Sinal teste
-    send_telegram(
-        "🧪 <b>SINAL TESTE</b>\n"
-        "Sistema operacional.\n"
-        "Aguardando fechamento do candle M1."
-    )
+    if not bot_iniciado:
+        send_telegram(
+            f"🤖 <b>TROIA-IA M1 ONLINE</b>\n"
+            f"⏱️ M1 | Mercado REAL\n"
+            f"🧭 Mercado: {mercado_atual()}\n"
+            f"📊 Ativos: {len(ativos_em_uso())}\n"
+            f"🕒 {hora} (BR)"
+        )
+        send_telegram(
+            "🧪 <b>SINAL TESTE</b>\nSistema operacional. Aguardando fechamento do candle M1."
+        )
+        bot_iniciado = True
 
 # ===============================
 # ESTRATÉGIA SIMPLES
@@ -107,18 +116,17 @@ def analisar(candle):
 def processar_candle(candle):
     global sinal_aberto, direcao_sinal, modo, cooldown_ativos
 
-    # Se em cooldown → não processa
+    # Cooldown ativo
     if ativo_atual in cooldown_ativos:
-        if time.time() - cooldown_ativos[ativo_atual] < 60:  # 1 min cooldown
+        if time.time() - cooldown_ativos[ativo_atual] < 60:  # 1 min
             atualizar_ativo()
             solicitar_candles()
             return
 
+    # Resultado
     if sinal_aberto:
-        green = (
-            (direcao_sinal == "CALL" and candle["close"] > candle["open"]) or
-            (direcao_sinal == "PUT" and candle["close"] < candle["open"])
-        )
+        green = (direcao_sinal == "CALL" and candle["close"] > candle["open"]) or \
+                (direcao_sinal == "PUT" and candle["close"] < candle["open"])
         send_telegram(
             f"{'🟢' if green else '🔴'} <b>RESULTADO</b>\n"
             f"📌 {ativo_atual}\n"
@@ -133,6 +141,7 @@ def processar_candle(candle):
         solicitar_candles()
         return
 
+    # Novo sinal
     direcao = analisar(candle)
     if direcao:
         sinal_aberto = True
@@ -147,7 +156,7 @@ def processar_candle(candle):
         )
         return
 
-    # Sem sinal → troca de ativo
+    # Sem sinal → próximo ativo
     atualizar_ativo()
     solicitar_candles()
 
@@ -167,11 +176,9 @@ def on_message(ws_, msg):
     data = json.loads(msg)
     if "candles" not in data:
         return
-
     candle = data["candles"][-1]
     candle["open"] = float(candle["open"])
     candle["close"] = float(candle["close"])
-
     if candle["epoch"] == ultimo_epoch:
         return
     ultimo_epoch = candle["epoch"]
@@ -191,18 +198,27 @@ def on_close(ws_, *a):
     time.sleep(5)
 
 # ===============================
-# MAIN LOOP
+# THREAD WS
 # ===============================
-if __name__ == "__main__":
+def ws_loop():
     while True:
         try:
-            websocket.WebSocketApp(
+            websocket.enableTrace(False)
+            ws_app = websocket.WebSocketApp(
                 DERIV_WS_URL,
                 on_open=on_open,
                 on_message=on_message,
                 on_error=on_error,
                 on_close=on_close
-            ).run_forever(ping_interval=30, ping_timeout=10)
+            )
+            ws_app.run_forever(ping_interval=30, ping_timeout=10)
         except Exception as e:
             print("Erro WS:", e)
             time.sleep(5)
+
+# ===============================
+# MAIN
+# ===============================
+if __name__ == "__main__":
+    threading.Thread(target=heartbeat, daemon=True).start()
+    ws_loop()
