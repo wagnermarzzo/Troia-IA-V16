@@ -91,9 +91,9 @@ def heartbeat(ws):
     while True:
         try:
             ws.send(json.dumps({"ping": 1}))
+            time.sleep(HEARTBEAT)
         except:
-            break
-        time.sleep(HEARTBEAT)
+            return
 
 # =====================================================
 # MERCADO
@@ -211,71 +211,77 @@ def template_resultado(msg_base, resultado, g, r, streak):
 """.strip()
 
 # =====================================================
-# LOOP PRINCIPAL
+# LOOP PRINCIPAL (BLINDADO)
 # =====================================================
 def loop():
-    ws = conectar_ws()
-    Thread(target=heartbeat, args=(ws,), daemon=True).start()
-
-    tg_send("🏆 <b>SALA PREMIUM SENTINEL IA</b>\n🤖 Sistema online • Análise 24/7")
-
     while True:
-        for mercado, ativos in [("Forex", FOREX), ("OTC", OTC)]:
-            CONF_MIN = 55 if mercado == "Forex" else 50
+        try:
+            ws = conectar_ws()
+            Thread(target=heartbeat, args=(ws,), daemon=True).start()
 
-            for cod, nome in ativos.items():
-                candles = pegar_candles(ws, cod, NUM_CANDLES)
-                if not candles or len(candles) < NUM_CANDLES:
-                    continue
+            tg_send("🏆 <b>SALA PREMIUM SENTINEL IA</b>\n🤖 Sistema online • Análise 24/7")
 
-                conf = confianca(candles)
-                if conf < CONF_MIN:
-                    continue
+            while True:
+                for mercado, ativos in [("Forex", FOREX), ("OTC", OTC)]:
+                    CONF_MIN = 55 if mercado == "Forex" else 50
 
-                dirc = direcao_majoritaria(candles)
-                if not dirc:
-                    continue
+                    for cod, nome in ativos.items():
+                        candles = pegar_candles(ws, cod, NUM_CANDLES)
+                        if not candles or len(candles) < NUM_CANDLES:
+                            continue
 
-                preco = candles[-1]["close"]
+                        conf = confianca(candles)
+                        if conf < CONF_MIN:
+                            continue
 
-                total, g, r, acc, streak, score = estatistica_ativo(nome)
-                if total >= 10 and score < 6:
-                    continue
+                        dirc = direcao_majoritaria(candles)
+                        if not dirc:
+                            continue
 
-                msg_base = template_entrada(
-                    nome, mercado, dirc, preco, total, g, r, acc, streak, score
-                )
+                        preco = candles[-1]["close"]
 
-                msg_id = tg_send(msg_base)
+                        total, g, r, acc, streak, score = estatistica_ativo(nome)
+                        if total >= 10 and score < 6:
+                            continue
 
-                time.sleep(TIMEFRAME + WAIT_BUFFER)
+                        msg_base = template_entrada(
+                            nome, mercado, dirc, preco, total, g, r, acc, streak, score
+                        )
 
-                candle_res = pegar_candles(ws, cod, 1)
-                if candle_res:
-                    c = candle_res[0]
-                    if c["close"] > c["open"]:
-                        resultado = "Green" if dirc == "CALL" else "Red"
-                    else:
-                        resultado = "Green" if dirc == "PUT" else "Red"
-                else:
-                    resultado = "Indefinido"
+                        msg_id = tg_send(msg_base)
 
-                salvar_hist({
-                    "ativo": nome,
-                    "resultado": resultado,
-                    "hora": datetime.now(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
-                })
+                        time.sleep(TIMEFRAME + WAIT_BUFFER)
 
-                total, g, r, acc, streak, score = estatistica_ativo(nome)
+                        candle_res = pegar_candles(ws, cod, 1)
+                        if candle_res:
+                            c = candle_res[0]
+                            if c["close"] > c["open"]:
+                                resultado = "Green" if dirc == "CALL" else "Red"
+                            else:
+                                resultado = "Green" if dirc == "PUT" else "Red"
+                        else:
+                            resultado = "Indefinido"
 
-                tg_edit(
-                    msg_id,
-                    template_resultado(msg_base, resultado, g, r, streak)
-                )
+                        salvar_hist({
+                            "ativo": nome,
+                            "resultado": resultado,
+                            "hora": datetime.now(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                        })
 
-                time.sleep(3)
+                        total, g, r, acc, streak, score = estatistica_ativo(nome)
 
-        time.sleep(1)
+                        tg_edit(
+                            msg_id,
+                            template_resultado(msg_base, resultado, g, r, streak)
+                        )
+
+                        time.sleep(3)
+
+                time.sleep(1)
+
+        except Exception as e:
+            print("⚠️ LOOP REINICIADO:", e)
+            time.sleep(5)
 
 # =====================================================
 # START
