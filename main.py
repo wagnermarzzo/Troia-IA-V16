@@ -1,6 +1,7 @@
-import websocket, json, time, requests, os
+import websocket, json, time, requests, os, threading
 from datetime import datetime, timezone, timedelta
 from threading import Thread
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # =====================================================
 # CREDENCIAIS
@@ -39,38 +40,59 @@ OTC = {
 }
 
 # =====================================================
+# KEEP ALIVE HTTP (RAILWAY)
+# =====================================================
+class KeepAlive(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Troia-IA V16 Online")
+
+def start_http():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), KeepAlive)
+    server.serve_forever()
+
+# =====================================================
 # TELEGRAM
 # =====================================================
 def tg_send(msg):
     r = requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
+        data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+        timeout=10
     ).json()
     return r["result"]["message_id"]
 
 def tg_edit(msg_id, msg):
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
-        data={"chat_id": TELEGRAM_CHAT_ID, "message_id": msg_id, "text": msg, "parse_mode": "HTML"}
+        data={"chat_id": TELEGRAM_CHAT_ID, "message_id": msg_id, "text": msg, "parse_mode": "HTML"},
+        timeout=10
     )
 
 # =====================================================
 # DERIV WS
 # =====================================================
 def conectar_ws():
-    ws = websocket.create_connection(
-        "wss://ws.derivws.com/websockets/v3?app_id=1089"
-    )
-    ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-    ws.recv()
-    return ws
+    while True:
+        try:
+            ws = websocket.create_connection(
+                "wss://ws.derivws.com/websockets/v3?app_id=1089",
+                timeout=10
+            )
+            ws.send(json.dumps({"authorize": DERIV_API_KEY}))
+            ws.recv()
+            return ws
+        except:
+            time.sleep(5)
 
 def heartbeat(ws):
     while True:
         try:
             ws.send(json.dumps({"ping": 1}))
         except:
-            pass
+            break
         time.sleep(HEARTBEAT)
 
 # =====================================================
@@ -85,7 +107,8 @@ def pegar_candles(ws, ativo, count):
             "count": count,
             "end": "latest"
         }))
-        return json.loads(ws.recv()).get("candles")
+        data = json.loads(ws.recv())
+        return data.get("candles")
     except:
         return None
 
@@ -197,8 +220,6 @@ def loop():
     tg_send("🏆 <b>SALA PREMIUM SENTINEL IA</b>\n🤖 Sistema online • Análise 24/7")
 
     while True:
-        agora = datetime.now(BR_TZ)
-
         for mercado, ativos in [("Forex", FOREX), ("OTC", OTC)]:
             CONF_MIN = 55 if mercado == "Forex" else 50
 
@@ -242,7 +263,7 @@ def loop():
                 salvar_hist({
                     "ativo": nome,
                     "resultado": resultado,
-                    "hora": agora.strftime("%Y-%m-%d %H:%M:%S")
+                    "hora": datetime.now(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
                 })
 
                 total, g, r, acc, streak, score = estatistica_ativo(nome)
@@ -260,4 +281,5 @@ def loop():
 # START
 # =====================================================
 if __name__ == "__main__":
+    threading.Thread(target=start_http, daemon=True).start()
     loop()
