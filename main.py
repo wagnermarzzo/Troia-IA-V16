@@ -68,27 +68,45 @@ def conectar_ws():
 
 def heartbeat(ws):
     while True:
-        ws.send(json.dumps({"ping": 1}))
+        try:
+            ws.send(json.dumps({"ping": 1}))
+        except:
+            pass
         time.sleep(HEARTBEAT)
 
 # =====================================================
 # MERCADO
 # =====================================================
 def pegar_candles(ws, ativo, count):
-    ws.send(json.dumps({
-        "ticks_history": ativo,
-        "style": "candles",
-        "granularity": TIMEFRAME,
-        "count": count,
-        "end": "latest"
-    }))
-    return json.loads(ws.recv()).get("candles")
+    try:
+        ws.send(json.dumps({
+            "ticks_history": ativo,
+            "style": "candles",
+            "granularity": TIMEFRAME,
+            "count": count,
+            "end": "latest"
+        }))
+        return json.loads(ws.recv()).get("candles")
+    except:
+        return None
 
 def direcao_majoritaria(candles):
+    if not candles or len(candles) < 5:
+        return None
+
     ultimas = candles[-5:]
-    return "CALL" if sum(1 for c in ultimas if c["close"] > c["open"]) >= 3 else "PUT"
+    altas = sum(1 for c in ultimas if c["close"] > c["open"])
+    baixas = sum(1 for c in ultimas if c["close"] < c["open"])
+
+    if altas > baixas:
+        return "CALL"
+    elif baixas > altas:
+        return "PUT"
+    return None
 
 def confianca(candles):
+    if not candles:
+        return 0
     call = sum(1 for c in candles if c["close"] > c["open"])
     put = len(candles) - call
     return int(max(call, put) / len(candles) * 100)
@@ -117,7 +135,7 @@ def estatistica_ativo(ativo):
         if h["resultado"] == "Green":
             greens += 1
             streak = streak + 1 if streak >= 0 else 1
-        else:
+        elif h["resultado"] == "Red":
             reds += 1
             streak = streak - 1 if streak <= 0 else -1
 
@@ -126,7 +144,7 @@ def estatistica_ativo(ativo):
     return total, greens, reds, acc, streak, score
 
 # =====================================================
-# TEMPLATE SALA PREMIUM (APLICADO AQUI)
+# TEMPLATES
 # =====================================================
 def template_entrada(nome, mercado, dirc, preco, total, g, r, acc, streak, score):
     seta = "⬆️ CALL" if dirc == "CALL" else "⬇️ PUT"
@@ -157,7 +175,7 @@ def template_entrada(nome, mercado, dirc, preco, total, g, r, acc, streak, score
 """.strip()
 
 def template_resultado(msg_base, resultado, g, r, streak):
-    emoji = "🟢💰" if resultado == "Green" else "🔴⚠️"
+    emoji = "🟢💰" if resultado == "Green" else "🔴⚠️" if resultado == "Red" else "⚪️"
     return msg_base + f"""
 
 ━━━━━━━━━━━━━━━━━━
@@ -184,6 +202,7 @@ def loop():
 
     while True:
         agora = datetime.now(BR_TZ)
+
         if agora.hour != hora_ref:
             sinais_hora = 0
             hora_ref = agora.hour
@@ -197,7 +216,7 @@ def loop():
 
             for cod, nome in ativos.items():
                 candles = pegar_candles(ws, cod, NUM_CANDLES)
-                if not candles:
+                if not candles or len(candles) < NUM_CANDLES:
                     continue
 
                 conf = confianca(candles)
@@ -205,6 +224,9 @@ def loop():
                     continue
 
                 dirc = direcao_majoritaria(candles)
+                if not dirc:
+                    continue
+
                 preco = candles[-1]["close"]
 
                 total, g, r, acc, streak, score = estatistica_ativo(nome)
@@ -221,7 +243,14 @@ def loop():
                 time.sleep(TIMEFRAME + WAIT_BUFFER)
 
                 candle_res = pegar_candles(ws, cod, 1)
-                resultado = "Green" if direcao_majoritaria(candle_res) == dirc else "Red"
+                if candle_res:
+                    c = candle_res[0]
+                    if c["close"] > c["open"]:
+                        resultado = "Green" if dirc == "CALL" else "Red"
+                    else:
+                        resultado = "Green" if dirc == "PUT" else "Red"
+                else:
+                    resultado = "Indefinido"
 
                 salvar_hist({
                     "ativo": nome,
