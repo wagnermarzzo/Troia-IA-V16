@@ -16,7 +16,6 @@ TIMEFRAME = 60
 NUM_CANDLES = 20
 WAIT_BUFFER = 2
 HEARTBEAT = 25
-MAX_SINAIS_HORA = 5
 BR_TZ = timezone(timedelta(hours=-3))
 HIST_FILE = "historico_sentinel.json"
 
@@ -197,19 +196,8 @@ def loop():
 
     tg_send("🏆 <b>SALA PREMIUM SENTINEL IA</b>\n🤖 Sistema online • Análise 24/7")
 
-    sinais_hora = 0
-    hora_ref = datetime.now(BR_TZ).hour
-
     while True:
         agora = datetime.now(BR_TZ)
-
-        if agora.hour != hora_ref:
-            sinais_hora = 0
-            hora_ref = agora.hour
-
-        if sinais_hora >= MAX_SINAIS_HORA:
-            time.sleep(5)
-            continue
 
         for mercado, ativos in [("Forex", FOREX), ("OTC", OTC)]:
             CONF_MIN = 55 if mercado == "Forex" else 50
@@ -238,7 +226,6 @@ def loop():
                 )
 
                 msg_id = tg_send(msg_base)
-                sinais_hora += 1
 
                 time.sleep(TIMEFRAME + WAIT_BUFFER)
 
