@@ -3,18 +3,17 @@ from datetime import datetime, timezone, timedelta
 from threading import Thread
 
 # =====================================================
-# CREDENCIAIS (FIXAS)
+# CREDENCIAIS
 # =====================================================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
-TELEGRAM_CHAT_ID = "-1003656750711"
+TELEGRAM_CHAT_ID = ""-1003656750711"
 
 # =====================================================
 # CONFIGURAÇÃO GERAL
 # =====================================================
 TIMEFRAME = 60
 NUM_CANDLES = 20
-CONF_MIN = 55
 WAIT_BUFFER = 2
 HEARTBEAT = 25
 MAX_SINAIS_HORA = 5
@@ -85,8 +84,9 @@ def pegar_candles(ws, ativo, count):
     }))
     return json.loads(ws.recv()).get("candles")
 
-def direcao(c):
-    return "CALL" if c["close"] > c["open"] else "PUT"
+def direcao_majoritaria(candles):
+    ultimas = candles[-5:]
+    return "CALL" if sum(1 for c in ultimas if c["close"] > c["open"]) >= 3 else "PUT"
 
 def confianca(candles):
     call = sum(1 for c in candles if c["close"] > c["open"])
@@ -116,13 +116,13 @@ def estatistica_ativo(ativo):
         total += 1
         if h["resultado"] == "Green":
             greens += 1
-            if streak >= 0: streak += 1
+            streak = streak + 1 if streak >= 0 else 1
         else:
             reds += 1
-            if streak <= 0: streak -= 1
+            streak = streak - 1 if streak <= 0 else -1
 
     acc = (greens / total * 100) if total else 0
-    score = min(10, round((acc * 0.6 + abs(streak) * 0.8) / 10, 1))
+    score = round((acc * 0.6 + abs(streak) * 8) / 10, 1)
     return total, greens, reds, acc, streak, score
 
 # =====================================================
@@ -132,7 +132,7 @@ def loop():
     ws = conectar_ws()
     Thread(target=heartbeat, args=(ws,), daemon=True).start()
 
-    tg_send("🤖 <b>IA Sentinel Analisando</b>\nForex & OTC • Quotex Friendly")
+    tg_send("🤖 <b>IA Sentinel BALANCEADA</b>\nAnálise 24/7 • Entrada imediata")
 
     sinais_hora = 0
     hora_ref = datetime.now(BR_TZ).hour
@@ -144,12 +144,13 @@ def loop():
             hora_ref = agora.hour
 
         if sinais_hora >= MAX_SINAIS_HORA:
-            time.sleep(10)
+            time.sleep(5)
             continue
 
         for mercado, ativos in [("Forex", FOREX), ("OTC", OTC)]:
-            for cod, nome in ativos.items():
+            CONF_MIN = 55 if mercado == "Forex" else 50
 
+            for cod, nome in ativos.items():
                 candles = pegar_candles(ws, cod, NUM_CANDLES)
                 if not candles:
                     continue
@@ -158,11 +159,11 @@ def loop():
                 if conf < CONF_MIN:
                     continue
 
-                dirc = direcao(candles[-1])
+                dirc = direcao_majoritaria(candles)
                 preco = candles[-1]["close"]
 
                 total, g, r, acc, streak, score = estatistica_ativo(nome)
-                if score < 6:
+                if total >= 10 and score < 6:
                     continue
 
                 msg = (
@@ -172,14 +173,14 @@ def loop():
                     f"Expiração: 1 Min\n"
                     f"Entrada: {'⬆️ CALL' if dirc=='CALL' else '⬇️ PUT'}\n"
                     f"Preço de referência: {preco}\n"
-                    f"Modo: Entrada imediata (vela em construção)\n\n"
-                    f"📈 Estatísticas do Ativo ({nome})\n"
-                    f"📌 Total de sinais: {total}\n"
+                    f"Modo: Entrada imediata\n\n"
+                    f"📈 Estatísticas ({nome})\n"
+                    f"📌 Total: {total}\n"
                     f"✅ Greens: {g}\n"
                     f"❌ Reds: {r}\n"
                     f"🎯 Assertividade: {acc:.1f}%\n"
-                    f"🔥 Sequência atual: {streak}\n"
-                    f"⭐ Score Dinâmico: {score}/10"
+                    f"🔥 Sequência: {streak}\n"
+                    f"⭐ Score: {score}/10"
                 )
 
                 msg_id = tg_send(msg)
@@ -188,7 +189,7 @@ def loop():
                 time.sleep(TIMEFRAME + WAIT_BUFFER)
 
                 candle_res = pegar_candles(ws, cod, 1)
-                resultado = "Green" if direcao(candle_res[0]) == dirc else "Red"
+                resultado = "Green" if direcao_majoritaria(candle_res) == dirc else "Red"
 
                 tg_edit(msg_id, msg + f"\n\n<b>Resultado:</b> {resultado}")
 
@@ -198,9 +199,9 @@ def loop():
                     "hora": agora.strftime("%Y-%m-%d %H:%M:%S")
                 })
 
-                time.sleep(5)
+                time.sleep(3)
 
-        time.sleep(2)
+        time.sleep(1)
 
 # =====================================================
 # START
