@@ -126,13 +126,58 @@ def estatistica_ativo(ativo):
     return total, greens, reds, acc, streak, score
 
 # =====================================================
+# TEMPLATE SALA PREMIUM (APLICADO AQUI)
+# =====================================================
+def template_entrada(nome, mercado, dirc, preco, total, g, r, acc, streak, score):
+    seta = "⬆️ CALL" if dirc == "CALL" else "⬇️ PUT"
+    return f"""
+━━━━━━━━━━━━━━━━━━
+🏆 <b>SALA PREMIUM • SENTINEL IA</b>
+━━━━━━━━━━━━━━━━━━
+
+📊 <b>ENTRADA CONFIRMADA</b>
+📌 Ativo: <b>{nome}</b>
+🌍 Mercado: {mercado}
+⏱ Expiração: 1 Min
+
+🎯 Direção: <b>{seta}</b>
+💰 Entrada: <b>IMEDIATA</b>
+📍 Preço: <b>{preco}</b>
+
+📈 <b>Estatísticas</b>
+📌 Total: {total}
+✅ Greens: {g}
+❌ Reds: {r}
+🎯 Assertividade: {acc:.1f}%
+🔥 Sequência: {streak}
+⭐ Score: {score}/10
+
+━━━━━━━━━━━━━━━━━━
+🕒 Aguarde o resultado…
+""".strip()
+
+def template_resultado(msg_base, resultado, g, r, streak):
+    emoji = "🟢💰" if resultado == "Green" else "🔴⚠️"
+    return msg_base + f"""
+
+━━━━━━━━━━━━━━━━━━
+<b>{emoji} RESULTADO: {resultado.upper()}</b>
+
+📊 Placar Atual
+✅ Greens: {g}
+❌ Reds: {r}
+🔥 Sequência: {streak}
+━━━━━━━━━━━━━━━━━━
+""".strip()
+
+# =====================================================
 # LOOP PRINCIPAL
 # =====================================================
 def loop():
     ws = conectar_ws()
     Thread(target=heartbeat, args=(ws,), daemon=True).start()
 
-    tg_send("🤖 <b>IA Sentinel BALANCEADA</b>\nAnálise 24/7 • Entrada imediata")
+    tg_send("🏆 <b>SALA PREMIUM SENTINEL IA</b>\n🤖 Sistema online • Análise 24/7")
 
     sinais_hora = 0
     hora_ref = datetime.now(BR_TZ).hour
@@ -166,24 +211,11 @@ def loop():
                 if total >= 10 and score < 6:
                     continue
 
-                msg = (
-                    f"📊 <b>SINAL GERADO</b>\n"
-                    f"Ativo: {nome}\n"
-                    f"Mercado: {mercado}\n"
-                    f"Expiração: 1 Min\n"
-                    f"Entrada: {'⬆️ CALL' if dirc=='CALL' else '⬇️ PUT'}\n"
-                    f"Preço de referência: {preco}\n"
-                    f"Modo: Entrada imediata\n\n"
-                    f"📈 Estatísticas ({nome})\n"
-                    f"📌 Total: {total}\n"
-                    f"✅ Greens: {g}\n"
-                    f"❌ Reds: {r}\n"
-                    f"🎯 Assertividade: {acc:.1f}%\n"
-                    f"🔥 Sequência: {streak}\n"
-                    f"⭐ Score: {score}/10"
+                msg_base = template_entrada(
+                    nome, mercado, dirc, preco, total, g, r, acc, streak, score
                 )
 
-                msg_id = tg_send(msg)
+                msg_id = tg_send(msg_base)
                 sinais_hora += 1
 
                 time.sleep(TIMEFRAME + WAIT_BUFFER)
@@ -191,13 +223,18 @@ def loop():
                 candle_res = pegar_candles(ws, cod, 1)
                 resultado = "Green" if direcao_majoritaria(candle_res) == dirc else "Red"
 
-                tg_edit(msg_id, msg + f"\n\n<b>Resultado:</b> {resultado}")
-
                 salvar_hist({
                     "ativo": nome,
                     "resultado": resultado,
                     "hora": agora.strftime("%Y-%m-%d %H:%M:%S")
                 })
+
+                total, g, r, acc, streak, score = estatistica_ativo(nome)
+
+                tg_edit(
+                    msg_id,
+                    template_resultado(msg_base, resultado, g, r, streak)
+                )
 
                 time.sleep(3)
 
