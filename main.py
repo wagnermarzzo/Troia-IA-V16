@@ -7,7 +7,7 @@ from threading import Thread, Event
 # =====================================================
 DERIV_API_KEY = "UEISANwBEI9sPVR"
 TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
-TELEGRAM_CHAT_ID = "2055716345"
+TELEGRAM_CHAT_ID = "-1003656750711"
 
 # =====================================================
 # CONFIGURAÇÃO GERAL
