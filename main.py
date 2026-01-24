@@ -10,96 +10,58 @@ TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 # =====================================================
-# CONFIGURAÇÕES GERAIS
+# CONFIGURAÇÃO GERAL
 # =====================================================
 TIMEFRAME = 60
+NUM_CANDLES = 20
+CONF_MIN = 55
+WAIT_BUFFER = 2
 HEARTBEAT = 25
+MAX_SINAIS_HORA = 5
 BR_TZ = timezone(timedelta(hours=-3))
-
-# =====================================================
-# MODO
-# =====================================================
-MODO_QUOTEX = True
-
-# =====================================================
-# PARÂMETROS QUOTEX FRIENDLY
-# =====================================================
-FOREX_CANDLES = 5
-OTC_CANDLES = 3
-
-FOREX_DELAY = (10, 30)
-OTC_DELAY = (20, 40)
+HIST_FILE = "historico_sentinel.json"
 
 # =====================================================
 # ATIVOS
 # =====================================================
-ATIVOS_FOREX = [
-    "frxEURUSD",
-    "frxGBPUSD",
-    "frxUSDJPY",
-    "frxAUDUSD",
-    "frxEURGBP"
-]
-
-ATIVOS_OTC = [
-    "OTC_DJI",
-    "OTC_SPC",
-    "OTC_NDX",
-    "OTC_FTSE",
-    "OTC_N225"
-]
-
-# =====================================================
-# NOMES AMIGÁVEIS (ESTILO FOREX)
-# =====================================================
-NOME_AMIGAVEL = {
+FOREX = {
     "frxEURUSD": "EUR/USD",
     "frxGBPUSD": "GBP/USD",
     "frxUSDJPY": "USD/JPY",
     "frxAUDUSD": "AUD/USD",
-    "frxEURGBP": "EUR/GBP",
-
-    "OTC_DJI":  "DJI/USD",
-    "OTC_SPC":  "SPX/USD",
-    "OTC_NDX":  "NDX/USD",
-    "OTC_FTSE": "FTSE/GBP",
-    "OTC_N225": "NIKKEI/JPY"
+    "frxEURGBP": "EUR/GBP"
 }
 
-def nome_ativo(a):
-    return NOME_AMIGAVEL.get(a, a)
+OTC = {
+    "OTC_DJI": "US30",
+    "OTC_SPC": "US500",
+    "OTC_NDX": "NAS100",
+    "OTC_FTSE": "UK100",
+    "OTC_N225": "JP225"
+}
 
 # =====================================================
 # TELEGRAM
 # =====================================================
 def tg_send(msg):
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
-            timeout=8
-        ).json()
-        return r.get("result", {}).get("message_id")
-    except:
-        return None
+    r = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
+    ).json()
+    return r["result"]["message_id"]
 
-def tg_edit(mid, msg):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
-            data={"chat_id": TELEGRAM_CHAT_ID, "message_id": mid, "text": msg, "parse_mode": "HTML"},
-            timeout=8
-        )
-    except:
-        pass
+def tg_edit(msg_id, msg):
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
+        data={"chat_id": TELEGRAM_CHAT_ID, "message_id": msg_id, "text": msg, "parse_mode": "HTML"}
+    )
 
 # =====================================================
-# DERIV WEBSOCKET
+# DERIV WS
 # =====================================================
 def conectar_ws():
     ws = websocket.create_connection(
-        "wss://ws.derivws.com/websockets/v3?app_id=1089",
-        timeout=10
+        "wss://ws.derivws.com/websockets/v3?app_id=1089"
     )
     ws.send(json.dumps({"authorize": DERIV_API_KEY}))
     ws.recv()
@@ -107,69 +69,61 @@ def conectar_ws():
 
 def heartbeat(ws):
     while True:
-        try:
-            ws.send(json.dumps({"ping": 1}))
-        except:
-            break
+        ws.send(json.dumps({"ping": 1}))
         time.sleep(HEARTBEAT)
 
-def pegar_candles(ws, ativo, qtd):
+# =====================================================
+# MERCADO
+# =====================================================
+def pegar_candles(ws, ativo, count):
     ws.send(json.dumps({
         "ticks_history": ativo,
         "style": "candles",
         "granularity": TIMEFRAME,
-        "count": qtd,
+        "count": count,
         "end": "latest"
     }))
     return json.loads(ws.recv()).get("candles")
 
-# =====================================================
-# FUNÇÕES AUXILIARES
-# =====================================================
 def direcao(c):
     return "CALL" if c["close"] > c["open"] else "PUT"
 
-def corpo(c):
-    return abs(c["close"] - c["open"])
-
-def pavio(c):
-    return (c["high"] - c["low"]) - corpo(c)
-
-# =====================================================
-# LÓGICA FOREX (QUOTEX FRIENDLY)
-# =====================================================
-def logica_forex(candles):
-    ult = candles[-5:]
-    dirs = [direcao(c) for c in ult]
-
-    if dirs.count(dirs[-1]) < 3:
-        return None
-
-    r = ult[-1]["high"] - ult[-1]["low"]
-    if r == 0:
-        return None
-
-    if corpo(ult[-1]) / r < 0.4:
-        return None
-
-    return dirs[-1]
+def confianca(candles):
+    call = sum(1 for c in candles if c["close"] > c["open"])
+    put = len(candles) - call
+    return int(max(call, put) / len(candles) * 100)
 
 # =====================================================
-# LÓGICA OTC (QUOTEX FRIENDLY)
+# HISTÓRICO + SCORE
 # =====================================================
-def logica_otc(candles):
-    ult = candles[-3:]
+def carregar_hist():
+    if os.path.exists(HIST_FILE):
+        return json.load(open(HIST_FILE))
+    return []
 
-    if direcao(ult[0]) != direcao(ult[1]):
-        return None
+def salvar_hist(d):
+    hist = carregar_hist()
+    hist.append(d)
+    json.dump(hist, open(HIST_FILE, "w"), indent=2)
 
-    if corpo(ult[1]) <= corpo(ult[0]):
-        return None
+def estatistica_ativo(ativo):
+    hist = carregar_hist()
+    total = greens = reds = streak = 0
 
-    if pavio(ult[1]) > corpo(ult[1]):
-        return None
+    for h in reversed(hist):
+        if h["ativo"] != ativo:
+            continue
+        total += 1
+        if h["resultado"] == "Green":
+            greens += 1
+            if streak >= 0: streak += 1
+        else:
+            reds += 1
+            if streak <= 0: streak -= 1
 
-    return direcao(ult[1])
+    acc = (greens / total * 100) if total else 0
+    score = min(10, round((acc * 0.6 + abs(streak) * 0.8) / 10, 1))
+    return total, greens, reds, acc, streak, score
 
 # =====================================================
 # LOOP PRINCIPAL
@@ -178,41 +132,75 @@ def loop():
     ws = conectar_ws()
     Thread(target=heartbeat, args=(ws,), daemon=True).start()
 
-    tg_send("🛰️ <b>IA SENTINEL</b>\nAnalisando mercado...\nForex + OTC • Quotex Friendly")
+    tg_send("🤖 <b>IA Sentinel Analisando</b>\nForex & OTC • Quotex Friendly")
+
+    sinais_hora = 0
+    hora_ref = datetime.now(BR_TZ).hour
 
     while True:
-        for ativo in ATIVOS_FOREX + ATIVOS_OTC:
+        agora = datetime.now(BR_TZ)
+        if agora.hour != hora_ref:
+            sinais_hora = 0
+            hora_ref = agora.hour
 
-            qtd = OTC_CANDLES if ativo in ATIVOS_OTC else FOREX_CANDLES
-            candles = pegar_candles(ws, ativo, qtd)
-            if not candles:
-                continue
+        if sinais_hora >= MAX_SINAIS_HORA:
+            time.sleep(10)
+            continue
 
-            direc = logica_otc(candles) if ativo in ATIVOS_OTC else logica_forex(candles)
-            if not direc:
-                continue
+        for mercado, ativos in [("Forex", FOREX), ("OTC", OTC)]:
+            for cod, nome in ativos.items():
 
-            delay = OTC_DELAY if ativo in ATIVOS_OTC else FOREX_DELAY
-            time.sleep(delay[0])
+                candles = pegar_candles(ws, cod, NUM_CANDLES)
+                if not candles:
+                    continue
 
-            msg = (
-                f"⚡ <b>SINAL QUOTEX FRIENDLY</b>\n"
-                f"📊 Ativo: {nome_ativo(ativo)}\n"
-                f"🎯 Direção: {direc}\n"
-                f"⏱ Entrada: AGORA\n"
-                f"⌛ Aguardando resultado..."
-            )
+                conf = confianca(candles)
+                if conf < CONF_MIN:
+                    continue
 
-            mid = tg_send(msg)
+                dirc = direcao(candles[-1])
+                preco = candles[-1]["close"]
 
-            time.sleep(TIMEFRAME)
+                total, g, r, acc, streak, score = estatistica_ativo(nome)
+                if score < 6:
+                    continue
 
-            res_c = pegar_candles(ws, ativo, 1)
-            resultado = "💸 Green" if res_c and direcao(res_c[0]) == direc else "🧨 Red"
+                msg = (
+                    f"📊 <b>SINAL GERADO</b>\n"
+                    f"Ativo: {nome}\n"
+                    f"Mercado: {mercado}\n"
+                    f"Expiração: 1 Min\n"
+                    f"Entrada: {'⬆️ CALL' if dirc=='CALL' else '⬇️ PUT'}\n"
+                    f"Preço de referência: {preco}\n"
+                    f"Modo: Entrada imediata (vela em construção)\n\n"
+                    f"📈 Estatísticas do Ativo ({nome})\n"
+                    f"📌 Total de sinais: {total}\n"
+                    f"✅ Greens: {g}\n"
+                    f"❌ Reds: {r}\n"
+                    f"🎯 Assertividade: {acc:.1f}%\n"
+                    f"🔥 Sequência atual: {streak}\n"
+                    f"⭐ Score Dinâmico: {score}/10"
+                )
 
-            tg_edit(mid, msg.replace("⌛ Aguardando resultado...", f"✅ Resultado: {resultado}"))
+                msg_id = tg_send(msg)
+                sinais_hora += 1
 
-            time.sleep(5)
+                time.sleep(TIMEFRAME + WAIT_BUFFER)
+
+                candle_res = pegar_candles(ws, cod, 1)
+                resultado = "Green" if direcao(candle_res[0]) == dirc else "Red"
+
+                tg_edit(msg_id, msg + f"\n\n<b>Resultado:</b> {resultado}")
+
+                salvar_hist({
+                    "ativo": nome,
+                    "resultado": resultado,
+                    "hora": agora.strftime("%Y-%m-%d %H:%M:%S")
+                })
+
+                time.sleep(5)
+
+        time.sleep(2)
 
 # =====================================================
 # START
