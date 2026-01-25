@@ -21,22 +21,21 @@ BR_TZ = timezone(timedelta(hours=-3))
 HIST_FILE = "historico_sentinel.json"
 
 # =====================================================
-# ATIVOS
+# ATIVOS FOREX (AMPLIADO)
 # =====================================================
 FOREX = {
     "frxEURUSD": "EUR/USD",
     "frxGBPUSD": "GBP/USD",
     "frxUSDJPY": "USD/JPY",
     "frxAUDUSD": "AUD/USD",
-    "frxEURGBP": "EUR/GBP"
-}
-
-OTC = {
-    "OTC_DJI": "US30",
-    "OTC_SPC": "US500",
-    "OTC_NDX": "NAS100",
-    "OTC_FTSE": "UK100",
-    "OTC_N225": "JP225"
+    "frxEURGBP": "EUR/GBP",
+    "frxUSDCAD": "USD/CAD",
+    "frxUSDCHF": "USD/CHF",
+    "frxNZDUSD": "NZD/USD",
+    "frxEURJPY": "EUR/JPY",
+    "frxGBPJPY": "GBP/JPY",
+    "frxAUDJPY": "AUD/JPY",
+    "frxEURAUD": "EUR/AUD"
 }
 
 # =====================================================
@@ -211,7 +210,7 @@ def template_resultado(msg_base, resultado, g, r, streak):
 """.strip()
 
 # =====================================================
-# LOOP PRINCIPAL (BLINDADO)
+# LOOP PRINCIPAL (FOREX ONLY / CONF 65)
 # =====================================================
 def loop():
     while True:
@@ -219,63 +218,63 @@ def loop():
             ws = conectar_ws()
             Thread(target=heartbeat, args=(ws,), daemon=True).start()
 
-            tg_send("🏆 <b>SALA PREMIUM SENTINEL IA</b>\n🤖 Sistema online • Análise 24/7")
+            tg_send("🏆 <b>SALA PREMIUM SENTINEL IA</b>\n🤖 Sistema online • Forex 24/7")
 
             while True:
-                for mercado, ativos in [("Forex", FOREX), ("OTC", OTC)]:
-                    CONF_MIN = 55 if mercado == "Forex" else 50
+                mercado = "Forex"
+                CONF_MIN = 65
 
-                    for cod, nome in ativos.items():
-                        candles = pegar_candles(ws, cod, NUM_CANDLES)
-                        if not candles or len(candles) < NUM_CANDLES:
-                            continue
+                for cod, nome in FOREX.items():
+                    candles = pegar_candles(ws, cod, NUM_CANDLES)
+                    if not candles or len(candles) < NUM_CANDLES:
+                        continue
 
-                        conf = confianca(candles)
-                        if conf < CONF_MIN:
-                            continue
+                    conf = confianca(candles)
+                    if conf < CONF_MIN:
+                        continue
 
-                        dirc = direcao_majoritaria(candles)
-                        if not dirc:
-                            continue
+                    dirc = direcao_majoritaria(candles)
+                    if not dirc:
+                        continue
 
-                        preco = candles[-1]["close"]
+                    preco = candles[-1]["close"]
 
-                        total, g, r, acc, streak, score = estatistica_ativo(nome)
-                        if total >= 10 and score < 6:
-                            continue
+                    total, g, r, acc, streak, score = estatistica_ativo(nome)
+                    if total >= 10 and score < 6:
+                        continue
 
-                        msg_base = template_entrada(
-                            nome, mercado, dirc, preco, total, g, r, acc, streak, score
-                        )
+                    msg_base = template_entrada(
+                        nome, mercado, dirc, preco, total, g, r, acc, streak, score
+                    )
 
-                        msg_id = tg_send(msg_base)
+                    msg_id = tg_send(msg_base)
 
-                        time.sleep(TIMEFRAME + WAIT_BUFFER)
+                    time.sleep(TIMEFRAME + WAIT_BUFFER)
 
-                        candle_res = pegar_candles(ws, cod, 1)
-                        if candle_res:
-                            c = candle_res[0]
-                            if c["close"] > c["open"]:
-                                resultado = "Green" if dirc == "CALL" else "Red"
-                            else:
-                                resultado = "Green" if dirc == "PUT" else "Red"
+                    candle_res = pegar_candles(ws, cod, 1)
+                    if candle_res:
+                        c = candle_res[0]
+                        if c["close"] > c["open"]:
+                            resultado = "Green" if dirc == "CALL" else "Red"
                         else:
-                            resultado = "Indefinido"
+                            resultado = "Green" if dirc == "PUT" else "Red"
+                    else:
+                        resultado = "Indefinido"
 
-                        salvar_hist({
-                            "ativo": nome,
-                            "resultado": resultado,
-                            "hora": datetime.now(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
-                        })
+                    salvar_hist({
+                        "ativo": nome,
+                        "resultado": resultado,
+                        "hora": datetime.now(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                    })
 
-                        total, g, r, acc, streak, score = estatistica_ativo(nome)
+                    total, g, r, acc, streak, score = estatistica_ativo(nome)
 
-                        tg_edit(
-                            msg_id,
-                            template_resultado(msg_base, resultado, g, r, streak)
-                        )
+                    tg_edit(
+                        msg_id,
+                        template_resultado(msg_base, resultado, g, r, streak)
+                    )
 
-                        time.sleep(3)
+                    time.sleep(3)
 
                 time.sleep(1)
 
