@@ -1,7 +1,11 @@
 import websocket, json, time, requests, os, threading
 from datetime import datetime, timezone, timedelta
-from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# =====================================================
+# BOOT LOG (PROVA DE VERSÃO)
+# =====================================================
+print("### SENTINEL RAILWAY-SAFE V1 INICIADO ###", flush=True)
 
 # =====================================================
 # CREDENCIAIS
@@ -11,12 +15,12 @@ TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 # =====================================================
-# CONFIG
+# CONFIGURAÇÃO
 # =====================================================
 TIMEFRAME = 60
 NUM_CANDLES = 10
 CONF_MIN = 48
-HEARTBEAT = 25
+HEARTBEAT = 20
 BR_TZ = timezone(timedelta(hours=-3))
 
 ANTECIPADO_DE = 40
@@ -36,10 +40,10 @@ FOREX = {
     "frxNZDUSD": "NZD/USD",
 }
 
-TICKS = {}  # buffer global de ticks
+TICKS = {}
 
 # =====================================================
-# KEEP ALIVE
+# KEEP ALIVE HTTP (MAIN THREAD)
 # =====================================================
 class KeepAlive(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -48,7 +52,9 @@ class KeepAlive(BaseHTTPRequestHandler):
         self.wfile.write(b"Sentinel IA Online")
 
 def start_http():
-    HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), KeepAlive).serve_forever()
+    port = int(os.environ.get("PORT", 8080))
+    print(f"HTTP SERVER NA PORTA {port}", flush=True)
+    HTTPServer(("0.0.0.0", port), KeepAlive).serve_forever()
 
 # =====================================================
 # TELEGRAM
@@ -72,17 +78,13 @@ def tg_edit(msg_id, msg):
 # DERIV WS
 # =====================================================
 def conectar_ws():
-    while True:
-        try:
-            ws = websocket.create_connection(
-                "wss://ws.derivws.com/websockets/v3?app_id=1089",
-                timeout=10
-            )
-            ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-            ws.recv()
-            return ws
-        except:
-            time.sleep(3)
+    ws = websocket.create_connection(
+        "wss://ws.derivws.com/websockets/v3?app_id=1089",
+        timeout=15
+    )
+    ws.send(json.dumps({"authorize": DERIV_API_KEY}))
+    ws.recv()
+    return ws
 
 def heartbeat(ws):
     while True:
@@ -93,23 +95,27 @@ def heartbeat(ws):
             break
 
 # =====================================================
-# SUBSCRIBE TICKS
+# SUBSCRIBE TICKS (PROTEGIDO)
 # =====================================================
 def subscrever_ticks():
-    ws = conectar_ws()
-    Thread(target=heartbeat, args=(ws,), daemon=True).start()
-
-    for ativo in FOREX.keys():
-        ws.send(json.dumps({"ticks": ativo, "subscribe": 1}))
-
     while True:
         try:
-            r = json.loads(ws.recv())
-            if "tick" in r:
-                sym = r["tick"]["symbol"]
-                TICKS[sym] = (r["tick"]["quote"], r["tick"]["epoch"])
-        except:
-            time.sleep(0.1)
+            ws = conectar_ws()
+            threading.Thread(target=heartbeat, args=(ws,), daemon=True).start()
+
+            for ativo in FOREX:
+                ws.send(json.dumps({"ticks": ativo, "subscribe": 1}))
+
+            print("✔ SUBSCRIÇÃO DE TICKS ATIVA", flush=True)
+
+            while True:
+                r = json.loads(ws.recv())
+                if "tick" in r:
+                    sym = r["tick"]["symbol"]
+                    TICKS[sym] = (r["tick"]["quote"], r["tick"]["epoch"])
+        except Exception as e:
+            print("⚠ ERRO WS TICK → reconectando", e, flush=True)
+            time.sleep(3)
 
 # =====================================================
 # CANDLES
@@ -131,9 +137,6 @@ def pegar_candles(ws, ativo):
 def agora():
     return datetime.now(BR_TZ).strftime("%H:%M:%S")
 
-def log(txt):
-    print(f"[{agora()}] {txt}", flush=True)
-
 # =====================================================
 # ANÁLISE
 # =====================================================
@@ -153,37 +156,33 @@ def confianca(candles):
 # =====================================================
 def loop():
     estados = {}
-
     ws_candle = conectar_ws()
-    Thread(target=heartbeat, args=(ws_candle,), daemon=True).start()
+    threading.Thread(target=heartbeat, args=(ws_candle,), daemon=True).start()
 
-    tg_send("🚀 <b>SENTINEL IA ONLINE</b>\n🔥 Ticks Reais • Forex REAL")
+    tg_send("🚀 <b>SENTINEL IA ONLINE</b>\n🔥 Railway Safe • Ticks Reais")
 
     while True:
         for cod, nome in FOREX.items():
-            preco_tick, epoch = TICKS.get(cod, (None, None))
-            if not epoch:
+            if cod not in TICKS:
                 continue
 
+            preco_tick, epoch = TICKS[cod]
             vela_atual = epoch // 60
             sec = epoch % 60
 
             # limpa estados travados
             for k in list(estados.keys()):
                 if vela_atual - estados[k]["vela_base"] > 3:
-                    log(f"{FOREX[k]} RESET travado")
                     del estados[k]
 
-            # ===== PRÉ SINAL =====
+            # PRÉ-SINAL
             if ANTECIPADO_DE <= sec <= ANTECIPADO_ATE and cod not in estados:
                 candles = pegar_candles(ws_candle, cod)
                 if not candles:
-                    log(f"{nome} sem candles")
                     continue
 
                 conf = confianca(candles)
                 if conf < CONF_MIN:
-                    log(f"{nome} descartado confiança {conf}%")
                     continue
 
                 ult = candles[-3:]
@@ -191,7 +190,6 @@ def loop():
                     sum(1 for c in ult if c["close"] > c["open"]) -
                     sum(1 for c in ult if c["close"] < c["open"])
                 ) == 0:
-                    log(f"{nome} lateral")
                     continue
 
                 dirc = direcao(candles)
@@ -199,7 +197,7 @@ def loop():
                     continue
 
                 msg_id = tg_send(
-                    f"📊 <b>PRÉ-SINAL</b>\n📌 {nome}\n🎯 {dirc}\n🕒 {agora()}\n🧠 {conf}%"
+                    f"📊 <b>PRÉ-SINAL</b>\n📌 {nome}\n🎯 {dirc}\n🧠 {conf}%"
                 )
 
                 estados[cod] = {
@@ -209,9 +207,7 @@ def loop():
                     "vela_base": vela_atual
                 }
 
-                log(f"{nome} ARMADO {dirc} {conf}%")
-
-            # ===== CONFIRMA =====
+            # CONFIRMA
             if cod in estados and estados[cod]["fase"] == "ARMADO":
                 if vela_atual > estados[cod]["vela_base"]:
                     candles = pegar_candles(ws_candle, cod)
@@ -220,17 +216,14 @@ def loop():
 
                     if conf < CONF_MIN or dirc != estados[cod]["dir"]:
                         tg_edit(estados[cod]["msg_id"], f"❌ <b>SINAL CANCELADO</b>\n📌 {nome}")
-                        log(f"{nome} CANCELADO")
                         del estados[cod]
                         continue
 
                     estados[cod]["fase"] = "CONFIRMADO"
                     estados[cod]["preco_ent"] = preco_tick
-
                     tg_edit(estados[cod]["msg_id"], f"✅ <b>ENTRADA CONFIRMADA</b>\n📌 {nome}")
-                    log(f"{nome} CONFIRMADO")
 
-            # ===== RESULTADO =====
+            # RESULTADO
             if cod in estados and estados[cod]["fase"] == "CONFIRMADO":
                 if vela_atual > estados[cod]["vela_base"] + 1:
                     preco_fim, _ = TICKS.get(cod, (None, None))
@@ -248,15 +241,14 @@ def loop():
                         f"📊 <b>RESULTADO FINAL</b>\n📌 {nome}\n🏁 {res}"
                     )
 
-                    log(f"{nome} RESULTADO {res}")
                     del estados[cod]
 
         time.sleep(0.5)
 
 # =====================================================
-# START
+# START (RAILWAY SAFE)
 # =====================================================
 if __name__ == "__main__":
-    threading.Thread(target=start_http, daemon=True).start()
     threading.Thread(target=subscrever_ticks, daemon=True).start()
-    loop()
+    threading.Thread(target=loop, daemon=True).start()
+    start_http()  # MAIN THREAD
