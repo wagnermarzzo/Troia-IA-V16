@@ -11,16 +11,16 @@ TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 # =====================================================
-# CONFIGURAÇÃO
+# CONFIGURAÇÃO (AGRESSIVO)
 # =====================================================
 TIMEFRAME = 60
-NUM_CANDLES = 20
-CONF_MIN = 55
+NUM_CANDLES = 10
+CONF_MIN = 48
 HEARTBEAT = 25
 BR_TZ = timezone(timedelta(hours=-3))
 
-ANTECIPADO_DE = 52
-ANTECIPADO_ATE = 58
+ANTECIPADO_DE = 45
+ANTECIPADO_ATE = 59
 
 # =====================================================
 # ATIVOS FOREX REAL
@@ -99,7 +99,8 @@ def pegar_candles(ws, ativo):
             "count": NUM_CANDLES,
             "end": "latest"
         }))
-        return json.loads(ws.recv()).get("candles")
+        r = json.loads(ws.recv())
+        return r.get("candles")
     except:
         return None
 
@@ -107,6 +108,8 @@ def pegar_tick(ws, ativo):
     try:
         ws.send(json.dumps({"ticks": ativo}))
         r = json.loads(ws.recv())
+        if "tick" not in r:
+            return None, None
         return r["tick"]["quote"], r["tick"]["epoch"]
     except:
         return None, None
@@ -115,10 +118,10 @@ def agora():
     return datetime.now(BR_TZ).strftime("%H:%M:%S")
 
 # =====================================================
-# ANÁLISE
+# ANÁLISE (AGRESSIVA)
 # =====================================================
 def direcao(candles):
-    ult = candles[-5:]
+    ult = candles[-3:]
     altas = sum(1 for c in ult if c["close"] > c["open"])
     baixas = sum(1 for c in ult if c["close"] < c["open"])
     return "CALL" if altas > baixas else "PUT" if baixas > altas else None
@@ -139,7 +142,7 @@ def loop():
     Thread(target=heartbeat, args=(ws,), daemon=True).start()
 
     if not online_enviado:
-        tg_send("🏆 <b>SENTINEL IA ONLINE</b>\n📡 Forex REAL • Tick real")
+        tg_send("🏆 <b>SENTINEL IA ONLINE</b>\n🔥 Modo AGRESSIVO • Forex REAL")
         online_enviado = True
 
     while True:
@@ -161,12 +164,22 @@ def loop():
                 if conf < CONF_MIN:
                     continue
 
+                # anti-lateral leve
+                ult = candles[-3:]
+                if sum(1 for c in ult if c["close"] > c["open"]) == 1 and \
+                   sum(1 for c in ult if c["close"] < c["open"]) == 1:
+                    continue
+
                 dirc = direcao(candles)
                 if not dirc:
                     continue
 
                 msg_id = tg_send(
-                    f"📊 <b>PRÉ-SINAL</b>\n📌 {nome}\n🎯 {dirc}\n🕒 {agora()}\n🧠 {conf}%"
+                    f"📊 <b>PRÉ-SINAL</b>\n"
+                    f"📌 {nome}\n"
+                    f"🎯 {dirc}\n"
+                    f"🕒 {agora()}\n"
+                    f"🧠 {conf}%"
                 )
 
                 estados[cod] = {
@@ -212,8 +225,10 @@ def loop():
                         else "RED" if preco_fim != ent else "EMPATE"
                     )
 
-                    tg_edit(estados[cod]["msg_id"],
-                            f"📊 <b>RESULTADO FINAL</b>\n📌 {nome}\n🏁 {res}")
+                    tg_edit(
+                        estados[cod]["msg_id"],
+                        f"📊 <b>RESULTADO FINAL</b>\n📌 {nome}\n🏁 {res}"
+                    )
 
                     del estados[cod]
 
