@@ -15,7 +15,7 @@ TELEGRAM_CHAT_ID = "-1003656750711"
 # =====================================================
 TIMEFRAME = 60
 NUM_CANDLES = 12
-CONF_MIN = 48   # propositalmente baixo para teste
+CONF_MIN = 48
 HEARTBEAT = 20
 BR_TZ = timezone(timedelta(hours=-3))
 HIST_FILE = "historico_sentinel.json"
@@ -133,12 +133,12 @@ def confianca(candles):
     return int(call / len(candles) * 100)
 
 # =====================================================
-# LOOP PRINCIPAL — PRÉ SINAL
+# LOOP PRINCIPAL — PRÉ → CONFIRMA → RESULTADO
 # =====================================================
 def loop():
     ws = conectar_ws()
     Thread(target=heartbeat, args=(ws,), daemon=True).start()
-    tg_send("⚠️ <b>SENTINEL IA V19</b>\n🔎 Modo PRÉ-SINAL ATIVO")
+    tg_send("⚠️ <b>SENTINEL IA V19.1</b>\n🔎 Pré-sinal com confirmação real de vela")
 
     while True:
         try:
@@ -153,7 +153,7 @@ def loop():
                     continue
 
                 candles = pegar_candles(ws, cod, NUM_CANDLES)
-                if not candles:
+                if not candles or len(candles) < NUM_CANDLES:
                     continue
 
                 conf = confianca(candles)
@@ -161,6 +161,7 @@ def loop():
                     continue
 
                 d = direcao(candles)
+                ultimo_epoch = candles[-1]["epoch"]
                 ultimo_sinal[cod] = agora_ts
 
                 msg_base = f"""
@@ -169,7 +170,7 @@ def loop():
 
 📌 Ativo: <b>{nome}</b>
 🎯 Direção provável: <b>{d}</b>
-⏱ Possível entrada: <b>{agora()[:5]}:{(int(agora()[6:8])//1+1)%60:02d}</b>
+⏱ Entrada prevista: <b>próxima vela</b>
 
 🧠 Confiança: {conf}%
 Status: Aguardando confirmação
@@ -178,8 +179,12 @@ Status: Aguardando confirmação
 
                 msg_id = tg_send(msg_base)
 
-                # aguarda abertura da próxima vela
-                time.sleep(5)
+                # aguarda troca REAL da vela
+                while True:
+                    c2 = pegar_candles(ws, cod, 2)
+                    if c2 and c2[-1]["epoch"] != ultimo_epoch:
+                        break
+                    time.sleep(0.3)
 
                 preco_ent = pegar_tick(ws, cod)
                 if not preco_ent:
@@ -190,6 +195,7 @@ Status: Aguardando confirmação
 
 ━━━━━━━━━━━━━━━━━━
 ✅ <b>ENTRADA CONFIRMADA</b>
+🕒 Entrada: {agora()}
 💰 Preço Entrada: {preco_ent}
 ━━━━━━━━━━━━━━━━━━
 """)
@@ -199,32 +205,32 @@ Status: Aguardando confirmação
                     time.sleep(0.4)
 
                 preco_fim = pegar_tick(ws, cod)
+                if not preco_fim:
+                    continue
 
-                if preco_fim:
-                    if preco_fim > preco_ent:
-                        res = "Green" if d == "CALL" else "Red"
-                    elif preco_fim < preco_ent:
-                        res = "Green" if d == "PUT" else "Red"
-                    else:
-                        res = "Empate"
+                if preco_fim > preco_ent:
+                    res = "Green" if d == "CALL" else "Red"
+                elif preco_fim < preco_ent:
+                    res = "Green" if d == "PUT" else "Red"
+                else:
+                    res = "Empate"
 
-                    salvar = {
-                        "ativo": nome,
-                        "direcao": d,
-                        "resultado": res,
-                        "entrada": preco_ent,
-                        "fechamento": preco_fim,
-                        "hora": agora()
-                    }
+                hist = json.load(open(HIST_FILE)) if os.path.exists(HIST_FILE) else []
+                hist.append({
+                    "ativo": nome,
+                    "direcao": d,
+                    "resultado": res,
+                    "entrada": preco_ent,
+                    "fechamento": preco_fim,
+                    "hora": agora()
+                })
+                json.dump(hist, open(HIST_FILE, "w"), indent=2)
 
-                    hist = json.load(open(HIST_FILE)) if os.path.exists(HIST_FILE) else []
-                    hist.append(salvar)
-                    json.dump(hist, open(HIST_FILE, "w"), indent=2)
-
-                    tg_edit(msg_id, msg_base + f"""
+                tg_edit(msg_id, msg_base + f"""
 
 ━━━━━━━━━━━━━━━━━━
 🏁 <b>RESULTADO: {res}</b>
+🕒 Fechamento: {agora()}
 💰 Preço Final: {preco_fim}
 ━━━━━━━━━━━━━━━━━━
 """)
