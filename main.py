@@ -11,17 +11,22 @@ TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 # =====================================================
-# CONFIGURAÇÃO GERAL
+# CONFIGURAÇÃO
 # =====================================================
 TIMEFRAME = 60
 NUM_CANDLES = 20
-WAIT_BUFFER = 2
+WAIT_BUFFER = 1
 HEARTBEAT = 25
+CONF_MIN = 65
 BR_TZ = timezone(timedelta(hours=-3))
 HIST_FILE = "historico_sentinel.json"
 
+# janela segura p/ sinal antecipado (segundos finais da vela)
+ANTECIPADO_DE = 52   # não mexa
+ANTECIPADO_ATE = 58 # não mexa
+
 # =====================================================
-# ATIVOS FOREX (AMPLIADO)
+# ATIVOS FOREX
 # =====================================================
 FOREX = {
     "frxEURUSD": "EUR/USD",
@@ -33,24 +38,21 @@ FOREX = {
     "frxUSDCHF": "USD/CHF",
     "frxNZDUSD": "NZD/USD",
     "frxEURJPY": "EUR/JPY",
-    "frxGBPJPY": "GBP/JPY",
-    "frxAUDJPY": "AUD/JPY",
-    "frxEURAUD": "EUR/AUD"
+    "frxGBPJPY": "GBP/JPY"
 }
 
 # =====================================================
-# KEEP ALIVE HTTP (RAILWAY)
+# KEEP ALIVE
 # =====================================================
 class KeepAlive(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Troia-IA V16 Online")
+        self.wfile.write(b"Sentinel IA Online")
 
 def start_http():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), KeepAlive)
-    server.serve_forever()
+    HTTPServer(("0.0.0.0", port), KeepAlive).serve_forever()
 
 # =====================================================
 # TELEGRAM
@@ -95,7 +97,7 @@ def heartbeat(ws):
             return
 
 # =====================================================
-# MERCADO
+# DADOS
 # =====================================================
 def pegar_candles(ws, ativo, count):
     try:
@@ -106,180 +108,132 @@ def pegar_candles(ws, ativo, count):
             "count": count,
             "end": "latest"
         }))
-        data = json.loads(ws.recv())
-        return data.get("candles")
+        return json.loads(ws.recv()).get("candles")
     except:
         return None
 
+def pegar_tick(ws, ativo):
+    try:
+        ws.send(json.dumps({"ticks": ativo}))
+        r = json.loads(ws.recv())
+        return r["tick"]["quote"], r["tick"]["epoch"]
+    except:
+        return None, None
+
+def agora():
+    return datetime.now(BR_TZ).strftime("%H:%M:%S")
+
+# =====================================================
+# ANÁLISE
+# =====================================================
 def direcao_majoritaria(candles):
-    if not candles or len(candles) < 5:
-        return None
-
-    ultimas = candles[-5:]
-    altas = sum(1 for c in ultimas if c["close"] > c["open"])
-    baixas = sum(1 for c in ultimas if c["close"] < c["open"])
-
-    if altas > baixas:
-        return "CALL"
-    elif baixas > altas:
-        return "PUT"
-    return None
+    ult = candles[-5:]
+    altas = sum(1 for c in ult if c["close"] > c["open"])
+    baixas = sum(1 for c in ult if c["close"] < c["open"])
+    return "CALL" if altas > baixas else "PUT" if baixas > altas else None
 
 def confianca(candles):
-    if not candles:
-        return 0
     call = sum(1 for c in candles if c["close"] > c["open"])
     put = len(candles) - call
     return int(max(call, put) / len(candles) * 100)
 
 # =====================================================
-# HISTÓRICO + SCORE
+# HISTÓRICO
 # =====================================================
 def carregar_hist():
-    if os.path.exists(HIST_FILE):
-        return json.load(open(HIST_FILE))
-    return []
+    return json.load(open(HIST_FILE)) if os.path.exists(HIST_FILE) else []
 
 def salvar_hist(d):
-    hist = carregar_hist()
-    hist.append(d)
-    json.dump(hist, open(HIST_FILE, "w"), indent=2)
-
-def estatistica_ativo(ativo):
-    hist = carregar_hist()
-    total = greens = reds = streak = 0
-
-    for h in reversed(hist):
-        if h["ativo"] != ativo:
-            continue
-        total += 1
-        if h["resultado"] == "Green":
-            greens += 1
-            streak = streak + 1 if streak >= 0 else 1
-        elif h["resultado"] == "Red":
-            reds += 1
-            streak = streak - 1 if streak <= 0 else -1
-
-    acc = (greens / total * 100) if total else 0
-    score = round((acc * 0.6 + abs(streak) * 8) / 10, 1)
-    return total, greens, reds, acc, streak, score
+    h = carregar_hist()
+    h.append(d)
+    json.dump(h, open(HIST_FILE, "w"), indent=2)
 
 # =====================================================
-# TEMPLATES
-# =====================================================
-def template_entrada(nome, mercado, dirc, preco, total, g, r, acc, streak, score):
-    seta = "⬆️ CALL" if dirc == "CALL" else "⬇️ PUT"
-    return f"""
-━━━━━━━━━━━━━━━━━━
-🏆 <b>SALA PREMIUM • SENTINEL IA</b>
-━━━━━━━━━━━━━━━━━━
-
-📊 <b>ENTRADA CONFIRMADA</b>
-📌 Ativo: <b>{nome}</b>
-🌍 Mercado: {mercado}
-⏱ Expiração: 1 Min
-
-🎯 Direção: <b>{seta}</b>
-💰 Entrada: <b>IMEDIATA</b>
-📍 Preço: <b>{preco}</b>
-
-📈 <b>Estatísticas</b>
-📌 Total: {total}
-✅ Greens: {g}
-❌ Reds: {r}
-🎯 Assertividade: {acc:.1f}%
-🔥 Sequência: {streak}
-⭐ Score: {score}/10
-
-━━━━━━━━━━━━━━━━━━
-🕒 Aguarde o resultado…
-""".strip()
-
-def template_resultado(msg_base, resultado, g, r, streak):
-    emoji = "🟢💰" if resultado == "Green" else "🔴⚠️" if resultado == "Red" else "⚪️"
-    return msg_base + f"""
-
-━━━━━━━━━━━━━━━━━━
-<b>{emoji} RESULTADO: {resultado.upper()}</b>
-
-📊 Placar Atual
-✅ Greens: {g}
-❌ Reds: {r}
-🔥 Sequência: {streak}
-━━━━━━━━━━━━━━━━━━
-""".strip()
-
-# =====================================================
-# LOOP PRINCIPAL (FOREX ONLY / CONF 65)
+# LOOP PRINCIPAL (BLINDADO)
 # =====================================================
 def loop():
     while True:
         try:
             ws = conectar_ws()
             Thread(target=heartbeat, args=(ws,), daemon=True).start()
-
-            tg_send("🏆 <b>SALA PREMIUM SENTINEL IA</b>\n🤖 Sistema online • Forex 24/7")
+            tg_send("🏆 <b>SENTINEL IA</b>\n🤖 Forex PRO • Tick Real")
 
             while True:
-                mercado = "Forex"
-                CONF_MIN = 65
+                sec = int(time.time()) % 60
+                if not (ANTECIPADO_DE <= sec <= ANTECIPADO_ATE):
+                    time.sleep(0.5)
+                    continue
 
                 for cod, nome in FOREX.items():
                     candles = pegar_candles(ws, cod, NUM_CANDLES)
-                    if not candles or len(candles) < NUM_CANDLES:
+                    if not candles:
                         continue
 
-                    conf = confianca(candles)
-                    if conf < CONF_MIN:
+                    if confianca(candles) < CONF_MIN:
                         continue
 
                     dirc = direcao_majoritaria(candles)
                     if not dirc:
                         continue
 
-                    preco = candles[-1]["close"]
-
-                    total, g, r, acc, streak, score = estatistica_ativo(nome)
-                    if total >= 10 and score < 6:
+                    preco_ent, epoch_ent = pegar_tick(ws, cod)
+                    if not preco_ent:
                         continue
 
-                    msg_base = template_entrada(
-                        nome, mercado, dirc, preco, total, g, r, acc, streak, score
-                    )
+                    msg_base = f"""
+━━━━━━━━━━━━━━━━━━
+🏆 <b>SENTINEL IA • FOREX</b>
+
+📊 <b>SINAL ANTECIPADO</b>
+📌 Ativo: <b>{nome}</b>
+🎯 Direção: <b>{dirc}</b>
+⏱ Expiração: 1 Min
+
+🕒 Entrada: <b>{agora()}</b>
+💰 Preço Entrada: <b>{preco_ent}</b>
+
+🧠 Confiança: {confianca(candles)}%
+━━━━━━━━━━━━━━━━━━
+""".strip()
 
                     msg_id = tg_send(msg_base)
 
-                    time.sleep(TIMEFRAME + WAIT_BUFFER)
+                    time.sleep(TIMEFRAME)
 
-                    candle_res = pegar_candles(ws, cod, 1)
-                    if candle_res:
-                        c = candle_res[0]
-                        if c["close"] > c["open"]:
-                            resultado = "Green" if dirc == "CALL" else "Red"
-                        else:
-                            resultado = "Green" if dirc == "PUT" else "Red"
+                    preco_fim, epoch_fim = pegar_tick(ws, cod)
+                    if not preco_fim:
+                        continue
+
+                    if preco_fim > preco_ent:
+                        res = "Green" if dirc == "CALL" else "Red"
+                    elif preco_fim < preco_ent:
+                        res = "Green" if dirc == "PUT" else "Red"
                     else:
-                        resultado = "Indefinido"
+                        res = "Empate"
 
                     salvar_hist({
                         "ativo": nome,
-                        "resultado": resultado,
-                        "hora": datetime.now(BR_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                        "resultado": res,
+                        "entrada": preco_ent,
+                        "fechamento": preco_fim,
+                        "hora": agora()
                     })
 
-                    total, g, r, acc, streak, score = estatistica_ativo(nome)
+                    tg_edit(msg_id, msg_base + f"""
 
-                    tg_edit(
-                        msg_id,
-                        template_resultado(msg_base, resultado, g, r, streak)
-                    )
+━━━━━━━━━━━━━━━━━━
+<b>RESULTADO: {res}</b>
+🕒 Fechamento: {agora()}
+💰 Preço Final: {preco_fim}
+━━━━━━━━━━━━━━━━━━
+""")
 
-                    time.sleep(3)
+                    time.sleep(2)
 
                 time.sleep(1)
 
         except Exception as e:
-            print("⚠️ LOOP REINICIADO:", e)
+            print("RESTART LOOP:", e)
             time.sleep(5)
 
 # =====================================================
