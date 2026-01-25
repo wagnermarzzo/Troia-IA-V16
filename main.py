@@ -14,14 +14,15 @@ TELEGRAM_CHAT_ID = "-1003656750711"
 # CONFIGURAÇÃO GERAL
 # =====================================================
 TIMEFRAME = 60
-NUM_CANDLES = 20
+NUM_CANDLES = 50   # agora usamos 50 candles para análise avançada
 WAIT_BUFFER = 2
 HEARTBEAT = 25
 BR_TZ = timezone(timedelta(hours=-3))
 HIST_FILE = "historico_sentinel.json"
+SCORE_RESET_THRESHOLD = 10
 
 # =====================================================
-# ATIVOS FOREX (AMPLIADO)
+# ATIVOS FOREX
 # =====================================================
 FOREX = {
     "frxEURUSD": "EUR/USD",
@@ -39,7 +40,7 @@ FOREX = {
 }
 
 # =====================================================
-# KEEP ALIVE HTTP (RAILWAY)
+# KEEP ALIVE HTTP
 # =====================================================
 class KeepAlive(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -56,19 +57,25 @@ def start_http():
 # TELEGRAM
 # =====================================================
 def tg_send(msg):
-    r = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
-        timeout=10
-    ).json()
-    return r["result"]["message_id"]
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+            timeout=10
+        ).json()
+        return r["result"]["message_id"]
+    except:
+        return None
 
 def tg_edit(msg_id, msg):
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
-        data={"chat_id": TELEGRAM_CHAT_ID, "message_id": msg_id, "text": msg, "parse_mode": "HTML"},
-        timeout=10
-    )
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
+            data={"chat_id": TELEGRAM_CHAT_ID, "message_id": msg_id, "text": msg, "parse_mode": "HTML"},
+            timeout=10
+        )
+    except:
+        pass
 
 # =====================================================
 # DERIV WS
@@ -82,8 +89,10 @@ def conectar_ws():
             )
             ws.send(json.dumps({"authorize": DERIV_API_KEY}))
             ws.recv()
+            print("✅ Conectado ao WebSocket")
             return ws
         except:
+            print("⚠️ Falha na conexão WS, tentando novamente em 5s...")
             time.sleep(5)
 
 def heartbeat(ws):
@@ -114,11 +123,9 @@ def pegar_candles(ws, ativo, count):
 def direcao_majoritaria(candles):
     if not candles or len(candles) < 5:
         return None
-
     ultimas = candles[-5:]
     altas = sum(1 for c in ultimas if c["close"] > c["open"])
     baixas = sum(1 for c in ultimas if c["close"] < c["open"])
-
     if altas > baixas:
         return "CALL"
     elif baixas > altas:
@@ -148,7 +155,6 @@ def salvar_hist(d):
 def estatistica_ativo(ativo):
     hist = carregar_hist()
     total = greens = reds = streak = 0
-
     for h in reversed(hist):
         if h["ativo"] != ativo:
             continue
@@ -159,10 +165,43 @@ def estatistica_ativo(ativo):
         elif h["resultado"] == "Red":
             reds += 1
             streak = streak - 1 if streak <= 0 else -1
-
     acc = (greens / total * 100) if total else 0
     score = round((acc * 0.6 + abs(streak) * 8) / 10, 1)
+    if total >= SCORE_RESET_THRESHOLD and score < 6:
+        score += 2
     return total, greens, reds, acc, streak, score
+
+# =====================================================
+# IA ULTRA-AVANÇADA
+# =====================================================
+def ia_ultra(candles):
+    if not candles or len(candles) < 10:
+        return direcao_majoritaria(candles)
+
+    closes = [c["close"] for c in candles]
+    # SMAs
+    sma5 = sum(closes[-5:]) / 5
+    sma10 = sum(closes[-10:]) / 10
+    sma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else sma10
+    # Candle majoritário
+    major = direcao_majoritaria(candles[-10:])
+
+    # Momentum e reversão
+    ultimos5 = candles[-5:]
+    altas = sum(1 for c in ultimos5 if c["close"] > c["open"])
+    baixas = 5 - altas
+
+    # Lógica avançada
+    if closes[-1] > sma5 and closes[-1] > sma10 and closes[-1] > sma20 and altas >= 3:
+        return "CALL"
+    elif closes[-1] < sma5 and closes[-1] < sma10 and closes[-1] < sma20 and baixas >= 3:
+        return "PUT"
+    # Reversão: candle forte contra tendência
+    if major == "CALL" and closes[-1] < sma5:
+        return "PUT"
+    if major == "PUT" and closes[-1] > sma5:
+        return "CALL"
+    return major
 
 # =====================================================
 # TEMPLATES
@@ -210,14 +249,13 @@ def template_resultado(msg_base, resultado, g, r, streak):
 """.strip()
 
 # =====================================================
-# LOOP PRINCIPAL (FOREX ONLY / CONF 65)
+# LOOP PRINCIPAL ULTRA
 # =====================================================
 def loop():
     while True:
         try:
             ws = conectar_ws()
             Thread(target=heartbeat, args=(ws,), daemon=True).start()
-
             tg_send("🏆 <b>SALA PREMIUM SENTINEL IA</b>\n🤖 Sistema online • Forex 24/7")
 
             while True:
@@ -227,28 +265,25 @@ def loop():
                 for cod, nome in FOREX.items():
                     candles = pegar_candles(ws, cod, NUM_CANDLES)
                     if not candles or len(candles) < NUM_CANDLES:
+                        print(f"⚠️ {nome}: Candles insuficientes ou falha ao receber dados.")
+                        ws = conectar_ws()
                         continue
 
                     conf = confianca(candles)
                     if conf < CONF_MIN:
+                        print(f"⚠️ {nome}: Confiança {conf}% abaixo do mínimo ({CONF_MIN}%).")
                         continue
 
-                    dirc = direcao_majoritaria(candles)
+                    dirc = ia_ultra(candles)
                     if not dirc:
+                        print(f"⚠️ {nome}: Direção indefinida pela IA.")
                         continue
 
                     preco = candles[-1]["close"]
-
                     total, g, r, acc, streak, score = estatistica_ativo(nome)
-                    if total >= 10 and score < 6:
-                        continue
-
-                    msg_base = template_entrada(
-                        nome, mercado, dirc, preco, total, g, r, acc, streak, score
-                    )
+                    msg_base = template_entrada(nome, mercado, dirc, preco, total, g, r, acc, streak, score)
 
                     msg_id = tg_send(msg_base)
-
                     time.sleep(TIMEFRAME + WAIT_BUFFER)
 
                     candle_res = pegar_candles(ws, cod, 1)
@@ -259,7 +294,9 @@ def loop():
                         else:
                             resultado = "Green" if dirc == "PUT" else "Red"
                     else:
+                        print(f"⚠️ {nome}: Falha ao receber candle de resultado.")
                         resultado = "Indefinido"
+                        ws = conectar_ws()
 
                     salvar_hist({
                         "ativo": nome,
@@ -268,11 +305,7 @@ def loop():
                     })
 
                     total, g, r, acc, streak, score = estatistica_ativo(nome)
-
-                    tg_edit(
-                        msg_id,
-                        template_resultado(msg_base, resultado, g, r, streak)
-                    )
+                    tg_edit(msg_id, template_resultado(msg_base, resultado, g, r, streak))
 
                     time.sleep(3)
 
