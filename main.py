@@ -14,7 +14,7 @@ TELEGRAM_CHAT_ID = "-1003656750711"
 # CONFIGURAÇÃO GERAL
 # =====================================================
 TIMEFRAME = 60
-NUM_CANDLES = 50   # agora usamos 50 candles para análise avançada
+NUM_CANDLES = 20   # reduzido para 20 candles
 WAIT_BUFFER = 2
 HEARTBEAT = 25
 BR_TZ = timezone(timedelta(hours=-3))
@@ -106,26 +106,32 @@ def heartbeat(ws):
 # =====================================================
 # MERCADO
 # =====================================================
-def pegar_candles(ws, ativo, count):
-    try:
-        ws.send(json.dumps({
-            "ticks_history": ativo,
-            "style": "candles",
-            "granularity": TIMEFRAME,
-            "count": count,
-            "end": "latest"
-        }))
-        data = json.loads(ws.recv())
-        return data.get("candles")
-    except:
-        return None
+def pegar_candles(ws, ativo, count, retries=3):
+    """Pega candles com retry interno sem reconectar WS a cada falha"""
+    for i in range(retries):
+        try:
+            ws.send(json.dumps({
+                "ticks_history": ativo,
+                "style": "candles",
+                "granularity": TIMEFRAME,
+                "count": count,
+                "end": "latest"
+            }))
+            data = json.loads(ws.recv())
+            candles = data.get("candles")
+            if candles and len(candles) >= min(count, 5):
+                return candles
+        except:
+            pass
+        time.sleep(1)
+    return None
 
 def direcao_majoritaria(candles):
     if not candles or len(candles) < 5:
         return None
     ultimas = candles[-5:]
     altas = sum(1 for c in ultimas if c["close"] > c["open"])
-    baixas = sum(1 for c in ultimas if c["close"] < c["open"])
+    baixas = 5 - altas
     if altas > baixas:
         return "CALL"
     elif baixas > altas:
@@ -172,31 +178,28 @@ def estatistica_ativo(ativo):
     return total, greens, reds, acc, streak, score
 
 # =====================================================
-# IA ULTRA-AVANÇADA
+# IA AVANÇADA (20 candles)
 # =====================================================
 def ia_ultra(candles):
-    if not candles or len(candles) < 10:
+    if not candles or len(candles) < 5:
         return direcao_majoritaria(candles)
 
     closes = [c["close"] for c in candles]
     # SMAs
     sma5 = sum(closes[-5:]) / 5
-    sma10 = sum(closes[-10:]) / 10
+    sma10 = sum(closes[-10:]) / 10 if len(closes) >= 10 else sma5
     sma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else sma10
-    # Candle majoritário
-    major = direcao_majoritaria(candles[-10:])
 
-    # Momentum e reversão
+    major = direcao_majoritaria(candles[-10:])
     ultimos5 = candles[-5:]
     altas = sum(1 for c in ultimos5 if c["close"] > c["open"])
     baixas = 5 - altas
 
-    # Lógica avançada
     if closes[-1] > sma5 and closes[-1] > sma10 and closes[-1] > sma20 and altas >= 3:
         return "CALL"
     elif closes[-1] < sma5 and closes[-1] < sma10 and closes[-1] < sma20 and baixas >= 3:
         return "PUT"
-    # Reversão: candle forte contra tendência
+    # reversão contra tendência
     if major == "CALL" and closes[-1] < sma5:
         return "PUT"
     if major == "PUT" and closes[-1] > sma5:
@@ -249,7 +252,7 @@ def template_resultado(msg_base, resultado, g, r, streak):
 """.strip()
 
 # =====================================================
-# LOOP PRINCIPAL ULTRA
+# LOOP PRINCIPAL
 # =====================================================
 def loop():
     while True:
@@ -264,9 +267,8 @@ def loop():
 
                 for cod, nome in FOREX.items():
                     candles = pegar_candles(ws, cod, NUM_CANDLES)
-                    if not candles or len(candles) < NUM_CANDLES:
-                        print(f"⚠️ {nome}: Candles insuficientes ou falha ao receber dados.")
-                        ws = conectar_ws()
+                    if not candles or len(candles) < 5:
+                        print(f"⚠️ {nome}: Candles insuficientes.")
                         continue
 
                     conf = confianca(candles)
@@ -296,7 +298,6 @@ def loop():
                     else:
                         print(f"⚠️ {nome}: Falha ao receber candle de resultado.")
                         resultado = "Indefinido"
-                        ws = conectar_ws()
 
                     salvar_hist({
                         "ativo": nome,
