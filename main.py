@@ -11,7 +11,7 @@ TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 # =====================================================
-# CONFIGURAÇÃO (AGRESSIVO)
+# CONFIGURAÇÃO
 # =====================================================
 TIMEFRAME = 60
 NUM_CANDLES = 10
@@ -19,11 +19,11 @@ CONF_MIN = 48
 HEARTBEAT = 25
 BR_TZ = timezone(timedelta(hours=-3))
 
-ANTECIPADO_DE = 45
-ANTECIPADO_ATE = 59
+ANTECIPADO_DE = 40
+ANTECIPADO_ATE = 58
 
 # =====================================================
-# ATIVOS FOREX REAL
+# ATIVOS
 # =====================================================
 FOREX = {
     "frxEURUSD": "EUR/USD",
@@ -80,7 +80,7 @@ def conectar_ws():
             ws.recv()
             return ws
         except:
-            time.sleep(5)
+            time.sleep(3)
 
 def heartbeat(ws):
     while True:
@@ -117,8 +117,11 @@ def pegar_tick(ws, ativo):
 def agora():
     return datetime.now(BR_TZ).strftime("%H:%M:%S")
 
+def log(txt):
+    print(f"[{agora()}] {txt}", flush=True)
+
 # =====================================================
-# ANÁLISE (AGRESSIVA)
+# ANÁLISE
 # =====================================================
 def direcao(candles):
     ult = candles[-3:]
@@ -132,54 +135,62 @@ def confianca(candles):
     return int(max(call, put) / len(candles) * 100)
 
 # =====================================================
-# LOOP PRINCIPAL (ESTÁVEL)
+# LOOP PRINCIPAL
 # =====================================================
 def loop():
     estados = {}
-    online_enviado = False
 
-    ws = conectar_ws()
-    Thread(target=heartbeat, args=(ws,), daemon=True).start()
+    ws_tick = conectar_ws()
+    ws_candle = conectar_ws()
 
-    if not online_enviado:
-        tg_send("🏆 <b>SENTINEL IA ONLINE</b>\n🔥 Modo AGRESSIVO • Forex REAL")
-        online_enviado = True
+    Thread(target=heartbeat, args=(ws_tick,), daemon=True).start()
+    Thread(target=heartbeat, args=(ws_candle,), daemon=True).start()
+
+    tg_send("🚀 <b>SENTINEL IA ONLINE</b>\n🔥 Modo AGRESSIVO • Forex REAL")
 
     while True:
         for cod, nome in FOREX.items():
-            preco_tick, epoch = pegar_tick(ws, cod)
+            preco_tick, epoch = pegar_tick(ws_tick, cod)
             if not epoch:
+                log(f"{nome} tick inválido")
                 continue
 
             vela_atual = epoch // 60
             sec = epoch % 60
 
-            # ========= PRÉ-SINAL =========
+            # ===== LIMPA TRAVADOS =====
+            for k in list(estados.keys()):
+                if vela_atual - estados[k]["vela_base"] > 3:
+                    log(f"{FOREX[k]} RESET estado travado")
+                    del estados[k]
+
+            # ===== PRÉ SINAL =====
             if ANTECIPADO_DE <= sec <= ANTECIPADO_ATE and cod not in estados:
-                candles = pegar_candles(ws, cod)
-                if not candles or len(candles) < NUM_CANDLES:
+                candles = pegar_candles(ws_candle, cod)
+                if not candles:
+                    log(f"{nome} sem candles")
                     continue
 
                 conf = confianca(candles)
                 if conf < CONF_MIN:
+                    log(f"{nome} descartado confiança {conf}%")
                     continue
 
-                # anti-lateral leve
                 ult = candles[-3:]
-                if sum(1 for c in ult if c["close"] > c["open"]) == 1 and \
-                   sum(1 for c in ult if c["close"] < c["open"]) == 1:
+                if abs(
+                    sum(1 for c in ult if c["close"] > c["open"]) -
+                    sum(1 for c in ult if c["close"] < c["open"])
+                ) == 0:
+                    log(f"{nome} descartado lateral")
                     continue
 
                 dirc = direcao(candles)
                 if not dirc:
+                    log(f"{nome} sem direção")
                     continue
 
                 msg_id = tg_send(
-                    f"📊 <b>PRÉ-SINAL</b>\n"
-                    f"📌 {nome}\n"
-                    f"🎯 {dirc}\n"
-                    f"🕒 {agora()}\n"
-                    f"🧠 {conf}%"
+                    f"📊 <b>PRÉ-SINAL</b>\n📌 {nome}\n🎯 {dirc}\n🕒 {agora()}\n🧠 {conf}%"
                 )
 
                 estados[cod] = {
@@ -189,18 +200,18 @@ def loop():
                     "vela_base": vela_atual
                 }
 
-            # ========= CONFIRMAÇÃO =========
+                log(f"{nome} ARMADO {dirc} {conf}%")
+
+            # ===== CONFIRMA =====
             if cod in estados and estados[cod]["fase"] == "ARMADO":
                 if vela_atual > estados[cod]["vela_base"]:
-                    candles = pegar_candles(ws, cod)
-                    if not candles:
-                        continue
-
+                    candles = pegar_candles(ws_candle, cod)
                     conf = confianca(candles)
                     dirc = direcao(candles)
 
                     if conf < CONF_MIN or dirc != estados[cod]["dir"]:
                         tg_edit(estados[cod]["msg_id"], f"❌ <b>SINAL CANCELADO</b>\n📌 {nome}")
+                        log(f"{nome} CANCELADO")
                         del estados[cod]
                         continue
 
@@ -208,14 +219,12 @@ def loop():
                     estados[cod]["preco_ent"] = preco_tick
 
                     tg_edit(estados[cod]["msg_id"], f"✅ <b>ENTRADA CONFIRMADA</b>\n📌 {nome}")
+                    log(f"{nome} CONFIRMADO")
 
-            # ========= RESULTADO =========
+            # ===== RESULTADO =====
             if cod in estados and estados[cod]["fase"] == "CONFIRMADO":
                 if vela_atual > estados[cod]["vela_base"] + 1:
-                    preco_fim, _ = pegar_tick(ws, cod)
-                    if not preco_fim:
-                        continue
-
+                    preco_fim, _ = pegar_tick(ws_tick, cod)
                     ent = estados[cod]["preco_ent"]
                     dirc = estados[cod]["dir"]
 
@@ -230,6 +239,7 @@ def loop():
                         f"📊 <b>RESULTADO FINAL</b>\n📌 {nome}\n🏁 {res}"
                     )
 
+                    log(f"{nome} RESULTADO {res}")
                     del estados[cod]
 
         time.sleep(0.6)
