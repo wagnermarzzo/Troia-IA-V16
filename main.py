@@ -91,19 +91,25 @@ def heartbeat(ws):
             break
 
 def pegar_candles(ws, ativo):
-    ws.send(json.dumps({
-        "ticks_history": ativo,
-        "style": "candles",
-        "granularity": TIMEFRAME,
-        "count": NUM_CANDLES,
-        "end": "latest"
-    }))
-    return json.loads(ws.recv()).get("candles")
+    try:
+        ws.send(json.dumps({
+            "ticks_history": ativo,
+            "style": "candles",
+            "granularity": TIMEFRAME,
+            "count": NUM_CANDLES,
+            "end": "latest"
+        }))
+        return json.loads(ws.recv()).get("candles")
+    except:
+        return None
 
 def pegar_tick(ws, ativo):
-    ws.send(json.dumps({"ticks": ativo}))
-    r = json.loads(ws.recv())
-    return r["tick"]["quote"], r["tick"]["epoch"]
+    try:
+        ws.send(json.dumps({"ticks": ativo}))
+        r = json.loads(ws.recv())
+        return r["tick"]["quote"], r["tick"]["epoch"]
+    except:
+        return None, None
 
 def agora():
     return datetime.now(BR_TZ).strftime("%H:%M:%S")
@@ -123,14 +129,18 @@ def confianca(candles):
     return int(max(call, put) / len(candles) * 100)
 
 # =====================================================
-# LOOP PRINCIPAL COM CONTROLE DE VELA
+# LOOP PRINCIPAL (ESTÁVEL)
 # =====================================================
 def loop():
     estados = {}
+    online_enviado = False
 
     ws = conectar_ws()
     Thread(target=heartbeat, args=(ws,), daemon=True).start()
-    tg_send("🏆 <b>SENTINEL IA ONLINE</b>\n📡 Forex REAL • Tick real")
+
+    if not online_enviado:
+        tg_send("🏆 <b>SENTINEL IA ONLINE</b>\n📡 Forex REAL • Tick real")
+        online_enviado = True
 
     while True:
         for cod, nome in FOREX.items():
@@ -144,7 +154,7 @@ def loop():
             # ========= PRÉ-SINAL =========
             if ANTECIPADO_DE <= sec <= ANTECIPADO_ATE and cod not in estados:
                 candles = pegar_candles(ws, cod)
-                if not candles:
+                if not candles or len(candles) < NUM_CANDLES:
                     continue
 
                 conf = confianca(candles)
@@ -155,22 +165,9 @@ def loop():
                 if not dirc:
                     continue
 
-                msg = f"""
-━━━━━━━━━━━━━━━━━━
-🏆 <b>SENTINEL IA • FOREX</b>
-
-📊 <b>PRÉ-SINAL</b>
-📌 Ativo: <b>{nome}</b>
-🎯 Direção provável: <b>{dirc}</b>
-⏱ Próxima vela
-
-🕒 Hora: {agora()}
-💰 Preço atual: {preco_tick}
-🧠 Confiança: {conf}%
-━━━━━━━━━━━━━━━━━━
-""".strip()
-
-                msg_id = tg_send(msg)
+                msg_id = tg_send(
+                    f"📊 <b>PRÉ-SINAL</b>\n📌 {nome}\n🎯 {dirc}\n🕒 {agora()}\n🧠 {conf}%"
+                )
 
                 estados[cod] = {
                     "fase": "ARMADO",
@@ -183,41 +180,44 @@ def loop():
             if cod in estados and estados[cod]["fase"] == "ARMADO":
                 if vela_atual > estados[cod]["vela_base"]:
                     candles = pegar_candles(ws, cod)
+                    if not candles:
+                        continue
+
                     conf = confianca(candles)
                     dirc = direcao(candles)
 
                     if conf < CONF_MIN or dirc != estados[cod]["dir"]:
-                        tg_edit(estados[cod]["msg_id"],
-                                f"❌ <b>SINAL CANCELADO</b>\n📌 {nome}\n🕒 {agora()}")
+                        tg_edit(estados[cod]["msg_id"], f"❌ <b>SINAL CANCELADO</b>\n📌 {nome}")
                         del estados[cod]
                         continue
 
                     estados[cod]["fase"] = "CONFIRMADO"
                     estados[cod]["preco_ent"] = preco_tick
 
-                    tg_edit(estados[cod]["msg_id"],
-                            f"✅ <b>ENTRADA CONFIRMADA</b>\n📌 {nome}\n🎯 {dirc}\n🕒 {agora()}")
+                    tg_edit(estados[cod]["msg_id"], f"✅ <b>ENTRADA CONFIRMADA</b>\n📌 {nome}")
 
             # ========= RESULTADO =========
             if cod in estados and estados[cod]["fase"] == "CONFIRMADO":
                 if vela_atual > estados[cod]["vela_base"] + 1:
                     preco_fim, _ = pegar_tick(ws, cod)
+                    if not preco_fim:
+                        continue
+
                     ent = estados[cod]["preco_ent"]
                     dirc = estados[cod]["dir"]
 
-                    if preco_fim > ent:
-                        res = "GREEN" if dirc == "CALL" else "RED"
-                    elif preco_fim < ent:
-                        res = "GREEN" if dirc == "PUT" else "RED"
-                    else:
-                        res = "EMPATE"
+                    res = (
+                        "GREEN" if (preco_fim > ent and dirc == "CALL") or
+                                   (preco_fim < ent and dirc == "PUT")
+                        else "RED" if preco_fim != ent else "EMPATE"
+                    )
 
                     tg_edit(estados[cod]["msg_id"],
-                            f"📊 <b>RESULTADO FINAL</b>\n📌 {nome}\n🎯 {dirc}\n🏁 {res}\n🕒 {agora()}")
+                            f"📊 <b>RESULTADO FINAL</b>\n📌 {nome}\n🏁 {res}")
 
                     del estados[cod]
 
-        time.sleep(0.5)
+        time.sleep(0.6)
 
 # =====================================================
 # START
