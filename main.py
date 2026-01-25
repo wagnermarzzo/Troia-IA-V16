@@ -11,25 +11,23 @@ TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 # =====================================================
-# CONFIGURAÇÃO – AGRESSIVO
+# CONFIGURAÇÃO (AGRESSIVO TESTE)
 # =====================================================
 TIMEFRAME = 60
-NUM_CANDLES = 15
+NUM_CANDLES = 12
+CONF_MIN = 48   # propositalmente baixo para teste
 HEARTBEAT = 20
-CONF_MIN = 52
 BR_TZ = timezone(timedelta(hours=-3))
 HIST_FILE = "historico_sentinel.json"
 
-# janela antecipada ampliada
 ANTECIPADO_DE = 40
-ANTECIPADO_ATE = 59
+ANTECIPADO_ATE = 58
 
-# cooldown por ativo (segundos)
-COOLDOWN = 120
+COOLDOWN = 90
 ultimo_sinal = {}
 
 # =====================================================
-# ATIVOS FOREX
+# ATIVOS
 # =====================================================
 FOREX = {
     "frxEURUSD": "EUR/USD",
@@ -37,11 +35,7 @@ FOREX = {
     "frxUSDJPY": "USD/JPY",
     "frxAUDUSD": "AUD/USD",
     "frxEURGBP": "EUR/GBP",
-    "frxUSDCAD": "USD/CAD",
-    "frxUSDCHF": "USD/CHF",
-    "frxNZDUSD": "NZD/USD",
-    "frxEURJPY": "EUR/JPY",
-    "frxGBPJPY": "GBP/JPY"
+    "frxUSDCAD": "USD/CAD"
 }
 
 # =====================================================
@@ -54,8 +48,7 @@ class KeepAlive(BaseHTTPRequestHandler):
         self.wfile.write(b"Sentinel IA Online")
 
 def start_http():
-    port = int(os.environ.get("PORT", 8080))
-    HTTPServer(("0.0.0.0", port), KeepAlive).serve_forever()
+    HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), KeepAlive).serve_forever()
 
 # =====================================================
 # TELEGRAM
@@ -127,7 +120,7 @@ def agora():
     return datetime.now(BR_TZ).strftime("%H:%M:%S")
 
 # =====================================================
-# ANÁLISE – AGRESSIVA
+# ANÁLISE
 # =====================================================
 def direcao(candles):
     ult = candles[-3:]
@@ -140,23 +133,12 @@ def confianca(candles):
     return int(call / len(candles) * 100)
 
 # =====================================================
-# HISTÓRICO
-# =====================================================
-def carregar_hist():
-    return json.load(open(HIST_FILE)) if os.path.exists(HIST_FILE) else []
-
-def salvar_hist(d):
-    h = carregar_hist()
-    h.append(d)
-    json.dump(h, open(HIST_FILE, "w"), indent=2)
-
-# =====================================================
-# LOOP PRINCIPAL
+# LOOP PRINCIPAL — PRÉ SINAL
 # =====================================================
 def loop():
     ws = conectar_ws()
     Thread(target=heartbeat, args=(ws,), daemon=True).start()
-    tg_send("🔥 <b>SENTINEL IA V18</b>\n⚡ MODO AGRESSIVO ATIVO")
+    tg_send("⚠️ <b>SENTINEL IA V19</b>\n🔎 Modo PRÉ-SINAL ATIVO")
 
     while True:
         try:
@@ -179,28 +161,38 @@ def loop():
                     continue
 
                 d = direcao(candles)
-                preco_ent = pegar_tick(ws, cod)
-                if not preco_ent:
-                    continue
-
                 ultimo_sinal[cod] = agora_ts
 
-                msg = f"""
+                msg_base = f"""
 ━━━━━━━━━━━━━━━━━━
-🔥 <b>SENTINEL IA • AGRESSIVO</b>
+⚠️ <b>PRÉ-SINAL</b>
 
 📌 Ativo: <b>{nome}</b>
-🎯 Direção: <b>{d}</b>
-⏱ Expiração: 1 Min
+🎯 Direção provável: <b>{d}</b>
+⏱ Possível entrada: <b>{agora()[:5]}:{(int(agora()[6:8])//1+1)%60:02d}</b>
 
-🕒 Entrada: <b>{agora()}</b>
-💰 Preço Entrada: <b>{preco_ent}</b>
-
-⚡ Confiança: {conf}%
+🧠 Confiança: {conf}%
+Status: Aguardando confirmação
 ━━━━━━━━━━━━━━━━━━
 """.strip()
 
-                msg_id = tg_send(msg)
+                msg_id = tg_send(msg_base)
+
+                # aguarda abertura da próxima vela
+                time.sleep(5)
+
+                preco_ent = pegar_tick(ws, cod)
+                if not preco_ent:
+                    tg_edit(msg_id, msg_base + "\n\n❌ <b>ENTRADA CANCELADA</b>")
+                    continue
+
+                tg_edit(msg_id, msg_base + f"""
+
+━━━━━━━━━━━━━━━━━━
+✅ <b>ENTRADA CONFIRMADA</b>
+💰 Preço Entrada: {preco_ent}
+━━━━━━━━━━━━━━━━━━
+""")
 
                 fim = time.time() + TIMEFRAME
                 while time.time() < fim:
@@ -216,30 +208,33 @@ def loop():
                     else:
                         res = "Empate"
 
-                    salvar_hist({
+                    salvar = {
                         "ativo": nome,
                         "direcao": d,
                         "resultado": res,
                         "entrada": preco_ent,
                         "fechamento": preco_fim,
                         "hora": agora()
-                    })
+                    }
 
-                    tg_edit(msg_id, msg + f"""
+                    hist = json.load(open(HIST_FILE)) if os.path.exists(HIST_FILE) else []
+                    hist.append(salvar)
+                    json.dump(hist, open(HIST_FILE, "w"), indent=2)
+
+                    tg_edit(msg_id, msg_base + f"""
 
 ━━━━━━━━━━━━━━━━━━
-<b>RESULTADO: {res}</b>
-🕒 Fechamento: {agora()}
+🏁 <b>RESULTADO: {res}</b>
 💰 Preço Final: {preco_fim}
 ━━━━━━━━━━━━━━━━━━
 """)
 
                 time.sleep(0.6)
 
-            time.sleep(0.3)
+            time.sleep(0.4)
 
         except Exception as e:
-            print("ERRO:", e)
+            print("ERRO LOOP:", e)
             time.sleep(2)
 
 # =====================================================
