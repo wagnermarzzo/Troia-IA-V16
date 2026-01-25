@@ -11,7 +11,7 @@ TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 # =====================================================
-# CONFIG
+# CONFIGURAÇÃO
 # =====================================================
 TIMEFRAME = 60
 NUM_CANDLES = 20
@@ -103,7 +103,7 @@ def pegar_candles(ws, ativo):
 def pegar_tick(ws, ativo):
     ws.send(json.dumps({"ticks": ativo}))
     r = json.loads(ws.recv())
-    return r["tick"]["quote"]
+    return r["tick"]["quote"], r["tick"]["epoch"]
 
 def agora():
     return datetime.now(BR_TZ).strftime("%H:%M:%S")
@@ -123,21 +123,25 @@ def confianca(candles):
     return int(max(call, put) / len(candles) * 100)
 
 # =====================================================
-# LOOP PRINCIPAL COM ESTADO
+# LOOP PRINCIPAL COM CONTROLE DE VELA
 # =====================================================
 def loop():
-    estados = {}  # ativo -> estado
+    estados = {}
 
     ws = conectar_ws()
     Thread(target=heartbeat, args=(ws,), daemon=True).start()
     tg_send("🏆 <b>SENTINEL IA ONLINE</b>\n📡 Forex REAL • Tick real")
 
     while True:
-        sec = int(time.time()) % 60
-
         for cod, nome in FOREX.items():
+            preco_tick, epoch = pegar_tick(ws, cod)
+            if not epoch:
+                continue
 
-            # ================= PRÉ-SINAL =================
+            vela_atual = epoch // 60
+            sec = epoch % 60
+
+            # ========= PRÉ-SINAL =========
             if ANTECIPADO_DE <= sec <= ANTECIPADO_ATE and cod not in estados:
                 candles = pegar_candles(ws, cod)
                 if not candles:
@@ -151,8 +155,6 @@ def loop():
                 if not dirc:
                     continue
 
-                preco = pegar_tick(ws, cod)
-
                 msg = f"""
 ━━━━━━━━━━━━━━━━━━
 🏆 <b>SENTINEL IA • FOREX</b>
@@ -163,7 +165,7 @@ def loop():
 ⏱ Próxima vela
 
 🕒 Hora: {agora()}
-💰 Preço atual: {preco}
+💰 Preço atual: {preco_tick}
 🧠 Confiança: {conf}%
 ━━━━━━━━━━━━━━━━━━
 """.strip()
@@ -174,13 +176,12 @@ def loop():
                     "fase": "ARMADO",
                     "dir": dirc,
                     "msg_id": msg_id,
-                    "preco_ent": preco,
-                    "hora_base": int(time.time())
+                    "vela_base": vela_atual
                 }
 
-            # ================= CONFIRMAÇÃO =================
+            # ========= CONFIRMAÇÃO =========
             if cod in estados and estados[cod]["fase"] == "ARMADO":
-                if int(time.time()) - estados[cod]["hora_base"] >= 60:
+                if vela_atual > estados[cod]["vela_base"]:
                     candles = pegar_candles(ws, cod)
                     conf = confianca(candles)
                     dirc = direcao(candles)
@@ -192,23 +193,24 @@ def loop():
                         continue
 
                     estados[cod]["fase"] = "CONFIRMADO"
-                    estados[cod]["preco_ent"] = pegar_tick(ws, cod)
+                    estados[cod]["preco_ent"] = preco_tick
 
                     tg_edit(estados[cod]["msg_id"],
                             f"✅ <b>ENTRADA CONFIRMADA</b>\n📌 {nome}\n🎯 {dirc}\n🕒 {agora()}")
 
-            # ================= RESULTADO =================
+            # ========= RESULTADO =========
             if cod in estados and estados[cod]["fase"] == "CONFIRMADO":
-                if int(time.time()) - estados[cod]["hora_base"] >= 120:
-                    preco_fim = pegar_tick(ws, cod)
+                if vela_atual > estados[cod]["vela_base"] + 1:
+                    preco_fim, _ = pegar_tick(ws, cod)
                     ent = estados[cod]["preco_ent"]
                     dirc = estados[cod]["dir"]
 
-                    res = "EMPATE"
                     if preco_fim > ent:
                         res = "GREEN" if dirc == "CALL" else "RED"
                     elif preco_fim < ent:
                         res = "GREEN" if dirc == "PUT" else "RED"
+                    else:
+                        res = "EMPATE"
 
                     tg_edit(estados[cod]["msg_id"],
                             f"📊 <b>RESULTADO FINAL</b>\n📌 {nome}\n🎯 {dirc}\n🏁 {res}\n🕒 {agora()}")
