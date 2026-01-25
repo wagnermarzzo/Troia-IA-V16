@@ -14,7 +14,8 @@ TELEGRAM_CHAT_ID = "-1003656750711"
 # CONFIGURAÇÃO GERAL
 # =====================================================
 TIMEFRAME = 60
-NUM_CANDLES = 20   # reduzido para 20 candles
+NUM_CANDLES = 20  # alvo
+MIN_CANDLES = 5   # mínimo para gerar sinal imediato
 WAIT_BUFFER = 2
 HEARTBEAT = 25
 BR_TZ = timezone(timedelta(hours=-3))
@@ -107,7 +108,7 @@ def heartbeat(ws):
 # MERCADO
 # =====================================================
 def pegar_candles(ws, ativo, count, retries=3):
-    """Pega candles com retry interno sem reconectar WS a cada falha"""
+    """Pega candles com retry interno, sem reconectar WS a cada falha"""
     for i in range(retries):
         try:
             ws.send(json.dumps({
@@ -119,7 +120,7 @@ def pegar_candles(ws, ativo, count, retries=3):
             }))
             data = json.loads(ws.recv())
             candles = data.get("candles")
-            if candles and len(candles) >= min(count, 5):
+            if candles and len(candles) >= MIN_CANDLES:
                 return candles
         except:
             pass
@@ -267,8 +268,8 @@ def loop():
 
                 for cod, nome in FOREX.items():
                     candles = pegar_candles(ws, cod, NUM_CANDLES)
-                    if not candles or len(candles) < 5:
-                        print(f"⚠️ {nome}: Candles insuficientes.")
+                    if not candles or len(candles) < MIN_CANDLES:
+                        print(f"⚠️ {nome}: Candles insuficientes (mínimo {MIN_CANDLES}).")
                         continue
 
                     conf = confianca(candles)
