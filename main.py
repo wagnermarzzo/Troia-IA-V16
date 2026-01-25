@@ -11,18 +11,22 @@ TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 # =====================================================
-# CONFIGURAÇÃO
+# CONFIGURAÇÃO – AGRESSIVO
 # =====================================================
 TIMEFRAME = 60
-NUM_CANDLES = 20
-HEARTBEAT = 25
-CONF_MIN = 58
+NUM_CANDLES = 15
+HEARTBEAT = 20
+CONF_MIN = 52
 BR_TZ = timezone(timedelta(hours=-3))
 HIST_FILE = "historico_sentinel.json"
 
-# janela segura p/ sinal antecipado
-ANTECIPADO_DE = 45
-ANTECIPADO_ATE = 58
+# janela antecipada ampliada
+ANTECIPADO_DE = 40
+ANTECIPADO_ATE = 59
+
+# cooldown por ativo (segundos)
+COOLDOWN = 120
+ultimo_sinal = {}
 
 # =====================================================
 # ATIVOS FOREX
@@ -85,7 +89,7 @@ def conectar_ws():
             ws.recv()
             return ws
         except:
-            time.sleep(5)
+            time.sleep(3)
 
 def heartbeat(ws):
     while True:
@@ -123,24 +127,17 @@ def agora():
     return datetime.now(BR_TZ).strftime("%H:%M:%S")
 
 # =====================================================
-# ANÁLISE
+# ANÁLISE – AGRESSIVA
 # =====================================================
-def direcao_majoritaria(candles):
-    ult = candles[-5:]
+def direcao(candles):
+    ult = candles[-3:]
     altas = sum(1 for c in ult if c["close"] > c["open"])
     baixas = sum(1 for c in ult if c["close"] < c["open"])
-
-    if altas > baixas:
-        return "CALL"
-    elif baixas > altas:
-        return "PUT"
-    else:
-        return "CALL"
+    return "CALL" if altas >= baixas else "PUT"
 
 def confianca(candles):
     call = sum(1 for c in candles if c["close"] > c["open"])
-    put = len(candles) - call
-    return int(max(call, put) / len(candles) * 100)
+    return int(call / len(candles) * 100)
 
 # =====================================================
 # HISTÓRICO
@@ -154,21 +151,25 @@ def salvar_hist(d):
     json.dump(h, open(HIST_FILE, "w"), indent=2)
 
 # =====================================================
-# LOOP PRINCIPAL (SEM BLOQUEIO)
+# LOOP PRINCIPAL
 # =====================================================
 def loop():
     ws = conectar_ws()
     Thread(target=heartbeat, args=(ws,), daemon=True).start()
-    tg_send("🏆 <b>SENTINEL IA V17</b>\n🤖 Forex PRO • Tick Real")
+    tg_send("🔥 <b>SENTINEL IA V18</b>\n⚡ MODO AGRESSIVO ATIVO")
 
     while True:
         try:
             sec = int(time.time()) % 60
             if not (ANTECIPADO_DE <= sec <= ANTECIPADO_ATE):
-                time.sleep(0.3)
+                time.sleep(0.25)
                 continue
 
             for cod, nome in FOREX.items():
+                agora_ts = time.time()
+                if cod in ultimo_sinal and agora_ts - ultimo_sinal[cod] < COOLDOWN:
+                    continue
+
                 candles = pegar_candles(ws, cod, NUM_CANDLES)
                 if not candles:
                     continue
@@ -177,54 +178,54 @@ def loop():
                 if conf < CONF_MIN:
                     continue
 
-                direcao = direcao_majoritaria(candles)
+                d = direcao(candles)
                 preco_ent = pegar_tick(ws, cod)
                 if not preco_ent:
                     continue
 
-                msg_base = f"""
-━━━━━━━━━━━━━━━━━━
-🏆 <b>SENTINEL IA • FOREX</b>
+                ultimo_sinal[cod] = agora_ts
 
-📊 <b>SINAL ANTECIPADO</b>
+                msg = f"""
+━━━━━━━━━━━━━━━━━━
+🔥 <b>SENTINEL IA • AGRESSIVO</b>
+
 📌 Ativo: <b>{nome}</b>
-🎯 Direção: <b>{direcao}</b>
+🎯 Direção: <b>{d}</b>
 ⏱ Expiração: 1 Min
 
 🕒 Entrada: <b>{agora()}</b>
 💰 Preço Entrada: <b>{preco_ent}</b>
 
-🧠 Confiança: {conf}%
+⚡ Confiança: {conf}%
 ━━━━━━━━━━━━━━━━━━
 """.strip()
 
-                msg_id = tg_send(msg_base)
+                msg_id = tg_send(msg)
 
-                fechamento = time.time() + TIMEFRAME
-                while time.time() < fechamento:
-                    time.sleep(0.5)
+                fim = time.time() + TIMEFRAME
+                while time.time() < fim:
+                    time.sleep(0.4)
 
                 preco_fim = pegar_tick(ws, cod)
-                if not preco_fim:
-                    continue
 
-                if preco_fim > preco_ent:
-                    res = "Green" if direcao == "CALL" else "Red"
-                elif preco_fim < preco_ent:
-                    res = "Green" if direcao == "PUT" else "Red"
-                else:
-                    res = "Empate"
+                if preco_fim:
+                    if preco_fim > preco_ent:
+                        res = "Green" if d == "CALL" else "Red"
+                    elif preco_fim < preco_ent:
+                        res = "Green" if d == "PUT" else "Red"
+                    else:
+                        res = "Empate"
 
-                salvar_hist({
-                    "ativo": nome,
-                    "direcao": direcao,
-                    "resultado": res,
-                    "entrada": preco_ent,
-                    "fechamento": preco_fim,
-                    "hora": agora()
-                })
+                    salvar_hist({
+                        "ativo": nome,
+                        "direcao": d,
+                        "resultado": res,
+                        "entrada": preco_ent,
+                        "fechamento": preco_fim,
+                        "hora": agora()
+                    })
 
-                tg_edit(msg_id, msg_base + f"""
+                    tg_edit(msg_id, msg + f"""
 
 ━━━━━━━━━━━━━━━━━━
 <b>RESULTADO: {res}</b>
@@ -233,13 +234,13 @@ def loop():
 ━━━━━━━━━━━━━━━━━━
 """)
 
-                time.sleep(1)
+                time.sleep(0.6)
 
-            time.sleep(0.5)
+            time.sleep(0.3)
 
         except Exception as e:
-            print("ERRO LOOP:", e)
-            time.sleep(3)
+            print("ERRO:", e)
+            time.sleep(2)
 
 # =====================================================
 # START
