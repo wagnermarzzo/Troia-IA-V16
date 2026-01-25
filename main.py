@@ -3,9 +3,9 @@ from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # =====================================================
-# BOOT LOG (PROVA DE VERSÃO)
+# BOOT LOG
 # =====================================================
-print("### SENTINEL RAILWAY-SAFE V1 INICIADO ###", flush=True)
+print("### SENTINEL IA V2 RAILWAY-SAFE INICIADO ###", flush=True)
 
 # =====================================================
 # CREDENCIAIS
@@ -20,23 +20,23 @@ TELEGRAM_CHAT_ID = "-1003656750711"
 TIMEFRAME = 60
 NUM_CANDLES = 10
 CONF_MIN = 48
-HEARTBEAT = 20
+HEARTBEAT = 15
 BR_TZ = timezone(timedelta(hours=-3))
 
 ANTECIPADO_DE = 40
 ANTECIPADO_ATE = 58
 
 # =====================================================
-# ATIVOS
+# ATIVOS (Forex real)
 # =====================================================
 FOREX = {
     "frxEURUSD": "EUR/USD",
     "frxGBPUSD": "GBP/USD",
     "frxUSDJPY": "USD/JPY",
+    "frxUSDCHF": "USD/CHF",
     "frxAUDUSD": "AUD/USD",
     "frxEURGBP": "EUR/GBP",
     "frxUSDCAD": "USD/CAD",
-    "frxUSDCHF": "USD/CHF",
     "frxNZDUSD": "NZD/USD",
 }
 
@@ -78,13 +78,20 @@ def tg_edit(msg_id, msg):
 # DERIV WS
 # =====================================================
 def conectar_ws():
-    ws = websocket.create_connection(
-        "wss://ws.derivws.com/websockets/v3?app_id=1089",
-        timeout=15
-    )
-    ws.send(json.dumps({"authorize": DERIV_API_KEY}))
-    ws.recv()
-    return ws
+    while True:
+        try:
+            ws = websocket.create_connection(
+                "wss://ws.derivws.com/websockets/v3?app_id=1089", timeout=15
+            )
+            ws.send(json.dumps({"authorize": DERIV_API_KEY}))
+            auth = json.loads(ws.recv())
+            if "error" in auth:
+                raise Exception(auth["error"]["message"])
+            print("✔ WS DERIV CONECTADO", flush=True)
+            return ws
+        except Exception as e:
+            print("⚠ ERRO CONEXÃO WS:", e, flush=True)
+            time.sleep(3)
 
 def heartbeat(ws):
     while True:
@@ -95,7 +102,7 @@ def heartbeat(ws):
             break
 
 # =====================================================
-# SUBSCRIBE TICKS (PROTEGIDO)
+# SUBSCRIBE TICKS (PROTEGIDO + LOG)
 # =====================================================
 def subscrever_ticks():
     while True:
@@ -110,9 +117,12 @@ def subscrever_ticks():
 
             while True:
                 r = json.loads(ws.recv())
-                if "tick" in r:
-                    sym = r["tick"]["symbol"]
-                    TICKS[sym] = (r["tick"]["quote"], r["tick"]["epoch"])
+                if "tick" in r and "quote" in r["tick"]:
+                    symbol = r["tick"]["symbol"]
+                    price = r["tick"]["quote"]
+                    epoch = r["tick"]["epoch"]
+                    TICKS[symbol] = (price, epoch)
+                    print(f"📊 Tick {FOREX[symbol]}: {price}", flush=True)
         except Exception as e:
             print("⚠ ERRO WS TICK → reconectando", e, flush=True)
             time.sleep(3)
@@ -159,7 +169,7 @@ def loop():
     ws_candle = conectar_ws()
     threading.Thread(target=heartbeat, args=(ws_candle,), daemon=True).start()
 
-    tg_send("🚀 <b>SENTINEL IA ONLINE</b>\n🔥 Railway Safe • Ticks Reais")
+    tg_send("🚀 <b>SENTINEL IA V2 ONLINE</b>\n🔥 Railway Safe • Ticks Reais")
 
     while True:
         for cod, nome in FOREX.items():
