@@ -14,8 +14,8 @@ TELEGRAM_CHAT_ID = "-1003656750711"
 # CONFIGURAÇÃO GERAL
 # =====================================================
 TIMEFRAME = 60
-NUM_CANDLES = 20  # alvo
-MIN_CANDLES = 5   # mínimo para gerar sinal imediato
+NUM_CANDLES = 20
+MIN_CANDLES = 1   # mínimo para gerar sinal imediato
 WAIT_BUFFER = 2
 HEARTBEAT = 25
 BR_TZ = timezone(timedelta(hours=-3))
@@ -108,8 +108,8 @@ def heartbeat(ws):
 # MERCADO
 # =====================================================
 def pegar_candles(ws, ativo, count, retries=3):
-    """Pega candles com retry interno, sem reconectar WS a cada falha"""
-    for i in range(retries):
+    """Pega candles com retry interno"""
+    for _ in range(retries):
         try:
             ws.send(json.dumps({
                 "ticks_history": ativo,
@@ -128,11 +128,13 @@ def pegar_candles(ws, ativo, count, retries=3):
     return None
 
 def direcao_majoritaria(candles):
-    if not candles or len(candles) < 5:
+    if not candles:
         return None
-    ultimas = candles[-5:]
+    if len(candles) == 1:  # fallback com 1 candle
+        return "CALL" if candles[0]["close"] > candles[0]["open"] else "PUT"
+    ultimas = candles[-5:] if len(candles) >= 5 else candles
     altas = sum(1 for c in ultimas if c["close"] > c["open"])
-    baixas = 5 - altas
+    baixas = len(ultimas) - altas
     if altas > baixas:
         return "CALL"
     elif baixas > altas:
@@ -179,28 +181,25 @@ def estatistica_ativo(ativo):
     return total, greens, reds, acc, streak, score
 
 # =====================================================
-# IA AVANÇADA (20 candles)
+# IA AVANÇADA
 # =====================================================
 def ia_ultra(candles):
-    if not candles or len(candles) < 5:
-        return direcao_majoritaria(candles)
-
+    if not candles:
+        return None
+    if len(candles) == 1:
+        return "CALL" if candles[0]["close"] > candles[0]["open"] else "PUT"
     closes = [c["close"] for c in candles]
-    # SMAs
     sma5 = sum(closes[-5:]) / 5
     sma10 = sum(closes[-10:]) / 10 if len(closes) >= 10 else sma5
     sma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else sma10
-
     major = direcao_majoritaria(candles[-10:])
     ultimos5 = candles[-5:]
     altas = sum(1 for c in ultimos5 if c["close"] > c["open"])
     baixas = 5 - altas
-
     if closes[-1] > sma5 and closes[-1] > sma10 and closes[-1] > sma20 and altas >= 3:
         return "CALL"
     elif closes[-1] < sma5 and closes[-1] < sma10 and closes[-1] < sma20 and baixas >= 3:
         return "PUT"
-    # reversão contra tendência
     if major == "CALL" and closes[-1] < sma5:
         return "PUT"
     if major == "PUT" and closes[-1] > sma5:
@@ -268,8 +267,8 @@ def loop():
 
                 for cod, nome in FOREX.items():
                     candles = pegar_candles(ws, cod, NUM_CANDLES)
-                    if not candles or len(candles) < MIN_CANDLES:
-                        print(f"⚠️ {nome}: Candles insuficientes (mínimo {MIN_CANDLES}).")
+                    if not candles:
+                        print(f"⚠️ {nome}: Falha ao receber candles.")
                         continue
 
                     conf = confianca(candles)
@@ -297,7 +296,6 @@ def loop():
                         else:
                             resultado = "Green" if dirc == "PUT" else "Red"
                     else:
-                        print(f"⚠️ {nome}: Falha ao receber candle de resultado.")
                         resultado = "Indefinido"
 
                     salvar_hist({
