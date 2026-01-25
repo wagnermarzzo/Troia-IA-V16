@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # =====================================================
 # BOOT LOG
 # =====================================================
-print("### SENTINEL IA V2.1 RAILWAY-SAFE PRÉ-SINAL INICIADO ###", flush=True)
+print("### SENTINEL IA V2.2 RAILWAY-SAFE PRÉ-SINAL IMEDIATO ###", flush=True)
 
 # =====================================================
 # CREDENCIAIS
@@ -23,7 +23,6 @@ CONF_MIN = 48
 HEARTBEAT = 15
 BR_TZ = timezone(timedelta(hours=-3))
 
-# Intervalo para pré-sinal (segundos)
 ANTECIPADO_DE = 45
 ANTECIPADO_ATE = 59
 
@@ -129,7 +128,7 @@ def subscrever_ticks():
             time.sleep(3)
 
 # =====================================================
-# CANDLES
+# CANDLES – usa histórico existente da Deriv
 # =====================================================
 def pegar_candles(ws, ativo):
     try:
@@ -138,11 +137,12 @@ def pegar_candles(ws, ativo):
             "style": "candles",
             "granularity": TIMEFRAME,
             "count": NUM_CANDLES,
-            "end": "latest"
+            "end": "latest"  # histórico existente da Deriv
         }))
         r = json.loads(ws.recv())
         return r.get("candles")
-    except:
+    except Exception as e:
+        print("⚠ ERRO PEGAR_CANDLES", e)
         return None
 
 def agora():
@@ -163,14 +163,14 @@ def confianca(candles):
     return int(max(call, put) / len(candles) * 100)
 
 # =====================================================
-# LOOP PRINCIPAL
+# LOOP PRINCIPAL – PRÉ-SINAL IMEDIATO
 # =====================================================
 def loop():
     estados = {}
     ws_candle = conectar_ws()
     threading.Thread(target=heartbeat, args=(ws_candle,), daemon=True).start()
 
-    tg_send("🚀 <b>SENTINEL IA V2.1 ONLINE</b>\n🔥 Pré-sinal ativado")
+    tg_send("🚀 <b>SENTINEL IA V2.2 ONLINE</b>\n🔥 Pré-sinal imediato usando histórico existente da Deriv")
 
     while True:
         for cod, nome in FOREX.items():
@@ -181,14 +181,14 @@ def loop():
             vela_atual = epoch // 60
             sec = epoch % 60
 
-            # Limpa estados travados
+            # limpa estados travados
             for k in list(estados.keys()):
                 if vela_atual - estados[k]["vela_base"] > 3:
                     del estados[k]
 
             # ========= PRÉ-SINAL ANTECIPADO =========
             if ANTECIPADO_DE <= sec <= ANTECIPADO_ATE and cod not in estados:
-                candles = pegar_candles(ws_candle, cod)
+                candles = pegar_candles(ws_candle, cod)  # usa histórico existente
                 if not candles or len(candles) < NUM_CANDLES:
                     continue
 
@@ -206,7 +206,7 @@ def loop():
                     continue
 
                 msg_id = tg_send(
-                    f"📊 <b>PRÉ-SINAL ANTECIPADO</b>\n📌 {nome}\n🎯 {dirc}\n🧠 {conf}%"
+                    f"📊 <b>PRÉ-SINAL IMEDIATO</b>\n📌 {nome}\n🎯 {dirc}\n🧠 {conf}%"
                 )
 
                 estados[cod] = {
