@@ -11,7 +11,7 @@ TELEGRAM_TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 TELEGRAM_CHAT_ID = "-1003656750711"
 
 # =====================================================
-# CONFIGURAÇÃO
+# CONFIG
 # =====================================================
 TIMEFRAME = 60
 NUM_CANDLES = 10
@@ -35,6 +35,8 @@ FOREX = {
     "frxUSDCHF": "USD/CHF",
     "frxNZDUSD": "NZD/USD",
 }
+
+TICKS = {}  # buffer global de ticks
 
 # =====================================================
 # KEEP ALIVE
@@ -90,6 +92,28 @@ def heartbeat(ws):
         except:
             break
 
+# =====================================================
+# SUBSCRIBE TICKS
+# =====================================================
+def subscrever_ticks():
+    ws = conectar_ws()
+    Thread(target=heartbeat, args=(ws,), daemon=True).start()
+
+    for ativo in FOREX.keys():
+        ws.send(json.dumps({"ticks": ativo, "subscribe": 1}))
+
+    while True:
+        try:
+            r = json.loads(ws.recv())
+            if "tick" in r:
+                sym = r["tick"]["symbol"]
+                TICKS[sym] = (r["tick"]["quote"], r["tick"]["epoch"])
+        except:
+            time.sleep(0.1)
+
+# =====================================================
+# CANDLES
+# =====================================================
 def pegar_candles(ws, ativo):
     try:
         ws.send(json.dumps({
@@ -103,16 +127,6 @@ def pegar_candles(ws, ativo):
         return r.get("candles")
     except:
         return None
-
-def pegar_tick(ws, ativo):
-    try:
-        ws.send(json.dumps({"ticks": ativo}))
-        r = json.loads(ws.recv())
-        if "tick" not in r:
-            return None, None
-        return r["tick"]["quote"], r["tick"]["epoch"]
-    except:
-        return None, None
 
 def agora():
     return datetime.now(BR_TZ).strftime("%H:%M:%S")
@@ -140,28 +154,24 @@ def confianca(candles):
 def loop():
     estados = {}
 
-    ws_tick = conectar_ws()
     ws_candle = conectar_ws()
-
-    Thread(target=heartbeat, args=(ws_tick,), daemon=True).start()
     Thread(target=heartbeat, args=(ws_candle,), daemon=True).start()
 
-    tg_send("🚀 <b>SENTINEL IA ONLINE</b>\n🔥 Modo AGRESSIVO • Forex REAL")
+    tg_send("🚀 <b>SENTINEL IA ONLINE</b>\n🔥 Ticks Reais • Forex REAL")
 
     while True:
         for cod, nome in FOREX.items():
-            preco_tick, epoch = pegar_tick(ws_tick, cod)
+            preco_tick, epoch = TICKS.get(cod, (None, None))
             if not epoch:
-                log(f"{nome} tick inválido")
                 continue
 
             vela_atual = epoch // 60
             sec = epoch % 60
 
-            # ===== LIMPA TRAVADOS =====
+            # limpa estados travados
             for k in list(estados.keys()):
                 if vela_atual - estados[k]["vela_base"] > 3:
-                    log(f"{FOREX[k]} RESET estado travado")
+                    log(f"{FOREX[k]} RESET travado")
                     del estados[k]
 
             # ===== PRÉ SINAL =====
@@ -181,12 +191,11 @@ def loop():
                     sum(1 for c in ult if c["close"] > c["open"]) -
                     sum(1 for c in ult if c["close"] < c["open"])
                 ) == 0:
-                    log(f"{nome} descartado lateral")
+                    log(f"{nome} lateral")
                     continue
 
                 dirc = direcao(candles)
                 if not dirc:
-                    log(f"{nome} sem direção")
                     continue
 
                 msg_id = tg_send(
@@ -224,7 +233,7 @@ def loop():
             # ===== RESULTADO =====
             if cod in estados and estados[cod]["fase"] == "CONFIRMADO":
                 if vela_atual > estados[cod]["vela_base"] + 1:
-                    preco_fim, _ = pegar_tick(ws_tick, cod)
+                    preco_fim, _ = TICKS.get(cod, (None, None))
                     ent = estados[cod]["preco_ent"]
                     dirc = estados[cod]["dir"]
 
@@ -242,11 +251,12 @@ def loop():
                     log(f"{nome} RESULTADO {res}")
                     del estados[cod]
 
-        time.sleep(0.6)
+        time.sleep(0.5)
 
 # =====================================================
 # START
 # =====================================================
 if __name__ == "__main__":
     threading.Thread(target=start_http, daemon=True).start()
+    threading.Thread(target=subscrever_ticks, daemon=True).start()
     loop()
