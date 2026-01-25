@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # =====================================================
 # BOOT LOG
 # =====================================================
-print("### SENTINEL IA V2 RAILWAY-SAFE INICIADO ###", flush=True)
+print("### SENTINEL IA V2.1 RAILWAY-SAFE PRÉ-SINAL INICIADO ###", flush=True)
 
 # =====================================================
 # CREDENCIAIS
@@ -23,8 +23,9 @@ CONF_MIN = 48
 HEARTBEAT = 15
 BR_TZ = timezone(timedelta(hours=-3))
 
-ANTECIPADO_DE = 40
-ANTECIPADO_ATE = 58
+# Intervalo para pré-sinal (segundos)
+ANTECIPADO_DE = 45
+ANTECIPADO_ATE = 59
 
 # =====================================================
 # ATIVOS (Forex real)
@@ -43,7 +44,7 @@ FOREX = {
 TICKS = {}
 
 # =====================================================
-# KEEP ALIVE HTTP (MAIN THREAD)
+# KEEP ALIVE HTTP
 # =====================================================
 class KeepAlive(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -169,7 +170,7 @@ def loop():
     ws_candle = conectar_ws()
     threading.Thread(target=heartbeat, args=(ws_candle,), daemon=True).start()
 
-    tg_send("🚀 <b>SENTINEL IA V2 ONLINE</b>\n🔥 Railway Safe • Ticks Reais")
+    tg_send("🚀 <b>SENTINEL IA V2.1 ONLINE</b>\n🔥 Pré-sinal ativado")
 
     while True:
         for cod, nome in FOREX.items():
@@ -180,15 +181,15 @@ def loop():
             vela_atual = epoch // 60
             sec = epoch % 60
 
-            # limpa estados travados
+            # Limpa estados travados
             for k in list(estados.keys()):
                 if vela_atual - estados[k]["vela_base"] > 3:
                     del estados[k]
 
-            # PRÉ-SINAL
+            # ========= PRÉ-SINAL ANTECIPADO =========
             if ANTECIPADO_DE <= sec <= ANTECIPADO_ATE and cod not in estados:
                 candles = pegar_candles(ws_candle, cod)
-                if not candles:
+                if not candles or len(candles) < NUM_CANDLES:
                     continue
 
                 conf = confianca(candles)
@@ -196,10 +197,8 @@ def loop():
                     continue
 
                 ult = candles[-3:]
-                if abs(
-                    sum(1 for c in ult if c["close"] > c["open"]) -
-                    sum(1 for c in ult if c["close"] < c["open"])
-                ) == 0:
+                if abs(sum(1 for c in ult if c["close"] > c["open"]) -
+                       sum(1 for c in ult if c["close"] < c["open"])) == 0:
                     continue
 
                 dirc = direcao(candles)
@@ -207,7 +206,7 @@ def loop():
                     continue
 
                 msg_id = tg_send(
-                    f"📊 <b>PRÉ-SINAL</b>\n📌 {nome}\n🎯 {dirc}\n🧠 {conf}%"
+                    f"📊 <b>PRÉ-SINAL ANTECIPADO</b>\n📌 {nome}\n🎯 {dirc}\n🧠 {conf}%"
                 )
 
                 estados[cod] = {
@@ -217,10 +216,13 @@ def loop():
                     "vela_base": vela_atual
                 }
 
-            # CONFIRMA
+            # ========= CONFIRMAÇÃO =========
             if cod in estados and estados[cod]["fase"] == "ARMADO":
                 if vela_atual > estados[cod]["vela_base"]:
                     candles = pegar_candles(ws_candle, cod)
+                    if not candles:
+                        continue
+
                     conf = confianca(candles)
                     dirc = direcao(candles)
 
@@ -233,7 +235,7 @@ def loop():
                     estados[cod]["preco_ent"] = preco_tick
                     tg_edit(estados[cod]["msg_id"], f"✅ <b>ENTRADA CONFIRMADA</b>\n📌 {nome}")
 
-            # RESULTADO
+            # ========= RESULTADO =========
             if cod in estados and estados[cod]["fase"] == "CONFIRMADO":
                 if vela_atual > estados[cod]["vela_base"] + 1:
                     preco_fim, _ = TICKS.get(cod, (None, None))
